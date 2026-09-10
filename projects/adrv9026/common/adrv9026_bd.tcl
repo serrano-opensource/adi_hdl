@@ -85,6 +85,7 @@ set MAX_RX_OS_NUM_OF_LANES [expr $ORX_ENABLE ? 2 : 0]
 
 source $ad_hdl_dir/library/jesd204/scripts/jesd204.tcl
 source $ad_hdl_dir/projects/common/xilinx/data_offload_bd.tcl
+source $ad_hdl_dir/projects/common/xilinx/adi_cic_filter_bd.tcl
 
 # adrv9026
 
@@ -170,6 +171,16 @@ ad_ip_instance util_cpack2 util_adrv9026_rx_cpack [list \
   SAMPLES_PER_CHANNEL $RX_SAMPLES_PER_CHANNEL \
   SAMPLE_DATA_WIDTH $RX_SAMPLE_WIDTH \
   ]
+
+# rx cic decimation (default = bypass, single-link/RX-OBS-disabled datapath only)
+
+set RX_CIC_RATE_WIDTH 8
+
+ad_ip_instance axi_cic_decimate_ctrl axi_adrv9026_rx_decimate_ctrl
+ad_connect  adrv9026_rx_device_clk axi_adrv9026_rx_decimate_ctrl/dec_clk
+
+ad_add_cic_decimation_filter rx_cic_decimator $RX_NUM_OF_CONVERTERS 5 1 \
+                              $RX_SAMPLE_WIDTH 4 32 4 $RX_CIC_RATE_WIDTH
 
 adi_tpl_jesd204_rx_create rx_adrv9026_tpl_core $RX_NUM_OF_LANES \
                                                $RX_NUM_OF_CONVERTERS \
@@ -384,13 +395,22 @@ ad_connect  axi_adrv9026_rx_jesd/rx_data_tvalid rx_adrv9026_tpl_core/link_valid
 ad_connect  adrv9026_rx_device_clk util_adrv9026_rx_cpack/clk
 ad_connect  adrv9026_rx_device_clk_rstgen/peripheral_reset util_adrv9026_rx_cpack/reset
 
+ad_connect  adrv9026_rx_device_clk rx_cic_decimator/aclk
+ad_connect  adrv9026_rx_device_clk_rstgen/peripheral_aresetn rx_cic_decimator/aresetn
+ad_connect  axi_adrv9026_rx_decimate_ctrl/dec_bypass rx_cic_decimator/bypass
+ad_connect  axi_adrv9026_rx_decimate_ctrl/dec_rate rx_cic_decimator/rate
+ad_connect  rx_cic_decimator/busy axi_adrv9026_rx_decimate_ctrl/dec_busy
+
 for {set i 0} {$i < $RX_NUM_OF_CONVERTERS} {incr i} {
   ad_connect  rx_adrv9026_tpl_core/adc_enable_$i util_adrv9026_rx_cpack/enable_$i
-  ad_connect  rx_adrv9026_tpl_core/adc_data_$i util_adrv9026_rx_cpack/fifo_wr_data_$i
+  ad_connect  rx_adrv9026_tpl_core/adc_valid_0 rx_cic_decimator/valid_in_$i
+  ad_connect  rx_adrv9026_tpl_core/adc_enable_$i rx_cic_decimator/enable_in_$i
+  ad_connect  rx_adrv9026_tpl_core/adc_data_$i rx_cic_decimator/data_in_$i
+  ad_connect  rx_cic_decimator/data_out_$i util_adrv9026_rx_cpack/fifo_wr_data_$i
 }
 ad_connect  $sys_dma_resetn axi_adrv9026_rx_dma/m_dest_axi_aresetn
 
-ad_connect  rx_adrv9026_tpl_core/adc_valid_0 util_adrv9026_rx_cpack/fifo_wr_en
+ad_connect  rx_cic_decimator/valid_out_0 util_adrv9026_rx_cpack/fifo_wr_en
 ad_connect  rx_adrv9026_tpl_core/adc_dovf util_adrv9026_rx_cpack/fifo_wr_overflow
 
 ad_connect  adrv9026_rx_device_clk axi_adrv9026_rx_dma/fifo_wr_clk
@@ -431,6 +451,7 @@ ad_cpu_interconnect 0x44A90000 axi_adrv9026_tx_jesd
 ad_cpu_interconnect 0x7C420000 axi_adrv9026_tx_dma
 ad_cpu_interconnect 0x44A60000 axi_adrv9026_rx_xcvr
 ad_cpu_interconnect 0x44AA0000 axi_adrv9026_rx_jesd
+ad_cpu_interconnect 0x44AB0000 axi_adrv9026_rx_decimate_ctrl
 ad_cpu_interconnect 0x7C400000 axi_adrv9026_rx_dma
 ad_cpu_interconnect 0x43C10000 axi_adrv9026_rx_clkgen
 ad_cpu_interconnect 0x43C00000 axi_adrv9026_tx_clkgen

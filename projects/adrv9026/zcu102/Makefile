@@ -11,10 +11,14 @@ M_DEPS += ../../scripts/adi_pd.tcl
 M_DEPS += ../../common/zcu102/zcu102_system_constr.xdc
 M_DEPS += ../../common/zcu102/zcu102_system_bd.tcl
 M_DEPS += ../../common/xilinx/data_offload_bd.tcl
+M_DEPS += ../../common/xilinx/adi_cic_filter_bd.tcl
+M_DEPS += ../../common/xilinx/cic_cfg_seq.v
 M_DEPS += ../../../library/util_hbm/scripts/adi_util_hbm.tcl
 M_DEPS += ../../../library/jesd204/scripts/jesd204.tcl
 M_DEPS += ../../../library/common/ad_iobuf.v
+M_DEPS += ../../../library/common/ad_bus_mux.v
 
+LIB_DEPS += axi_cic_decimate_ctrl
 LIB_DEPS += axi_clkgen
 LIB_DEPS += axi_dmac
 LIB_DEPS += axi_sysid
