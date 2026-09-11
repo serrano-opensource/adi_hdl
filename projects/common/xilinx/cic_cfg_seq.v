@@ -71,7 +71,7 @@ module cic_cfg_seq #(
 
   reg [1:0]                          state = ST_RST;
   reg [$clog2(RESET_CYCLES+1)-1:0]   rst_cnt = 'd0;
-  reg [RATE_WIDTH-1:0]               rate_d = 'd0;
+  reg [RATE_WIDTH-1:0]               rate_d = 'd4;
   reg                                cic_aresetn_r = 1'b0;
   reg                                cfg_tvalid_r = 1'b0;
   reg [RATE_WIDTH-1:0]               cfg_tdata_r = 'd0;
@@ -81,6 +81,14 @@ module cic_cfg_seq #(
   assign cfg_tvalid = cfg_tvalid_r;
   assign busy = (state != ST_IDLE);
 
+  always @(posedge clk) begin
+    if (aresetn == 1'b0) begin
+      rate_d <= 'd4;
+    end else if (state == ST_IDLE) begin
+      rate_d <= rate;
+    end
+  end
+
   always @(posedge clk or negedge aresetn) begin
     if (aresetn == 1'b0) begin
       state <= ST_RST;
@@ -88,7 +96,6 @@ module cic_cfg_seq #(
       cic_aresetn_r <= 1'b0;
       cfg_tvalid_r <= 1'b0;
       cfg_tdata_r <= 'd0;
-      rate_d <= rate;
     end else begin
       case (state)
         ST_RST: begin
@@ -113,7 +120,6 @@ module cic_cfg_seq #(
         end
         default: begin // ST_IDLE
           cic_aresetn_r <= 1'b1;
-          rate_d <= rate;
           if (rate_d != rate) begin
             rst_cnt <= 'd0;
             state <= ST_RST;

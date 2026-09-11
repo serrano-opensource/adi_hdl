@@ -52,6 +52,14 @@ proc ad_add_cic_decimation_filter {name n_chan number_of_stages differential_del
   ad_connect $name/rate $name/cfg_seq/rate
   ad_connect $name/cfg_seq/busy $name/busy
 
+  # synchronize the sequencer-generated active-low CIC reset to the CIC clock
+  ad_ip_instance proc_sys_reset $name/cic_rstgen
+  ad_ip_parameter $name/cic_rstgen CONFIG.C_EXT_RST_WIDTH 1
+  ad_ip_parameter $name/cic_rstgen CONFIG.C_EXT_RESET_HIGH 0
+
+  ad_connect $name/cfg_seq/cic_aresetn $name/cic_rstgen/ext_reset_in
+  ad_connect $name/aclk $name/cic_rstgen/slowest_sync_clk
+
   # add filter instances for n channels
   for {set i 0} {$i < $n_chan} {incr i} {
     ad_ip_instance cic_compiler $name/${filter_name}_${i} [ list \
@@ -75,7 +83,7 @@ proc ad_add_cic_decimation_filter {name n_chan number_of_stages differential_del
     ]
 
     ad_connect $name/aclk $name/${filter_name}_${i}/aclk
-    ad_connect $name/cfg_seq/cic_aresetn $name/${filter_name}_${i}/aresetn
+    ad_connect $name/cic_rstgen/peripheral_aresetn $name/${filter_name}_${i}/aresetn
     ad_connect $name/cfg_seq/cfg_tdata $name/${filter_name}_${i}/s_axis_config_tdata
     ad_connect $name/cfg_seq/cfg_tvalid $name/${filter_name}_${i}/s_axis_config_tvalid
 
