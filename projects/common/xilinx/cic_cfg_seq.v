@@ -46,6 +46,18 @@
 // A bypass-mode change does not go through this sequencer: the CIC cores
 // keep running continuously regardless of which path the downstream
 // bypass mux selects, so toggling bypass never needs a reset/reconfig.
+//
+// rate_d is reset to a plain constant (0), not to "rate": resetting a
+// register to the (multi-bit, data-dependent) value of another signal
+// makes its per-bit async clear/preset depend on that signal's value,
+// which Vivado's STA cannot verify recovery/removal timing for (flagged
+// as "cannot be timed accurately" on synthesis). Because rate_d only
+// feeds the ST_IDLE change-comparison (not the actual config value sent
+// to the CIC cores -- ST_RST sources cfg_tdata_r directly from the live
+// "rate" input, always valid), starting rate_d from 0 is safe: it just
+// makes the first ST_IDLE comparison after reset always see a "changed"
+// rate and run one harmless extra RST/CFG reconfiguration, re-applying
+// the already-correct rate a second time before settling.
 
 module cic_cfg_seq #(
   parameter RATE_WIDTH = 8,
@@ -88,7 +100,7 @@ module cic_cfg_seq #(
       cic_aresetn_r <= 1'b0;
       cfg_tvalid_r <= 1'b0;
       cfg_tdata_r <= 'd0;
-      rate_d <= rate;
+      rate_d <= 'd0;
     end else begin
       case (state)
         ST_RST: begin
@@ -97,7 +109,7 @@ module cic_cfg_seq #(
           if (rst_cnt == RESET_CYCLES-1) begin
             rst_cnt <= 'd0;
             cic_aresetn_r <= 1'b1;
-            cfg_tdata_r <= rate_d;
+            cfg_tdata_r <= rate;
             cfg_tvalid_r <= 1'b1;
             state <= ST_CFG;
           end else begin

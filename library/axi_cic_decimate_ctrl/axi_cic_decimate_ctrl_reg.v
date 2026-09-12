@@ -45,6 +45,11 @@ module axi_cic_decimate_ctrl_reg #(
   output                    dec_bypass,
   input                     dec_busy,
 
+  input                     tx_clk,
+  output  [RATE_WIDTH-1:0]  tx_dec_rate,
+  output                    tx_dec_bypass,
+  input                     tx_dec_busy,
+
   // bus interface
 
   input                     up_rstn,
@@ -64,35 +69,53 @@ module axi_cic_decimate_ctrl_reg #(
   reg     [31:0]            up_version = 32'h00010000;
   reg     [31:0]            up_scratch = 32'h0;
 
-  reg     [RATE_WIDTH-1:0]  up_cic_rate = 'd4;
-  reg                       up_cic_bypass = 1'b1;   // bypass enabled by default/reset
+  reg     [RATE_WIDTH-1:0]  up_rx_cic_rate = 'd4;
+  reg                       up_rx_cic_bypass = 1'b1;   // bypass enabled by default/reset
 
-  // busy status readback (dec_clk -> up_clk, single bit, plain 2-FF sync)
+  reg     [RATE_WIDTH-1:0]  up_tx_cic_rate = 'd4;
+  reg                       up_tx_cic_bypass = 1'b1;   // bypass enabled by default/reset
 
-  reg                       up_busy_m1 = 1'b0;
-  reg                       up_busy_m2 = 1'b0;
+  // busy status readback (dec_clk/tx_clk -> up_clk, single bit, plain 2-FF sync)
+
+  reg                       up_rx_busy_m1 = 1'b0;
+  reg                       up_rx_busy_m2 = 1'b0;
+  reg                       up_tx_busy_m1 = 1'b0;
+  reg                       up_tx_busy_m2 = 1'b0;
 
   always @(posedge up_clk) begin
-    up_busy_m1 <= dec_busy;
-    up_busy_m2 <= up_busy_m1;
+    up_rx_busy_m1 <= dec_busy;
+    up_rx_busy_m2 <= up_rx_busy_m1;
+  end
+
+  always @(posedge up_clk) begin
+    up_tx_busy_m1 <= tx_dec_busy;
+    up_tx_busy_m2 <= up_tx_busy_m1;
   end
 
   always @(negedge up_rstn or posedge up_clk) begin
     if (up_rstn == 0) begin
       up_wack <= 'd0;
       up_scratch <= 'd0;
-      up_cic_rate <= 'd4;
-      up_cic_bypass <= 1'b1;
+      up_rx_cic_rate <= 'd4;
+      up_rx_cic_bypass <= 1'b1;
+      up_tx_cic_rate <= 'd4;
+      up_tx_cic_bypass <= 1'b1;
     end else begin
       up_wack <= up_wreq;
       if ((up_wreq == 1'b1) && (up_waddr[4:0] == 5'h01)) begin
         up_scratch <= up_wdata;
       end
       if ((up_wreq == 1'b1) && (up_waddr[4:0] == 5'h10)) begin
-        up_cic_rate <= up_wdata[RATE_WIDTH-1:0];
+        up_rx_cic_rate <= up_wdata[RATE_WIDTH-1:0];
       end
       if ((up_wreq == 1'b1) && (up_waddr[4:0] == 5'h11)) begin
-        up_cic_bypass <= up_wdata[0];
+        up_rx_cic_bypass <= up_wdata[0];
+      end
+      if ((up_wreq == 1'b1) && (up_waddr[4:0] == 5'h12)) begin
+        up_tx_cic_rate <= up_wdata[RATE_WIDTH-1:0];
+      end
+      if ((up_wreq == 1'b1) && (up_waddr[4:0] == 5'h13)) begin
+        up_tx_cic_bypass <= up_wdata[0];
       end
     end
   end
@@ -109,8 +132,10 @@ module axi_cic_decimate_ctrl_reg #(
         case (up_raddr[4:0])
           5'h00: up_rdata <= up_version;
           5'h01: up_rdata <= up_scratch;
-          5'h10: up_rdata <= {{(32-RATE_WIDTH){1'b0}}, up_cic_rate};
-          5'h11: up_rdata <= {30'h0, up_busy_m2, up_cic_bypass};
+          5'h10: up_rdata <= {{(32-RATE_WIDTH){1'b0}}, up_rx_cic_rate};
+          5'h11: up_rdata <= {30'h0, up_rx_busy_m2, up_rx_cic_bypass};
+          5'h12: up_rdata <= {{(32-RATE_WIDTH){1'b0}}, up_tx_cic_rate};
+          5'h13: up_rdata <= {30'h0, up_tx_busy_m2, up_tx_cic_bypass};
           default: up_rdata <= 32'h0;
         endcase
       end else begin
@@ -119,17 +144,29 @@ module axi_cic_decimate_ctrl_reg #(
     end
   end
 
-  // up_clk -> dec_clk transfer of {bypass, rate}, atomic multi-bit CDC
+  // up_clk -> dec_clk / tx_clk transfer of {bypass, rate}, atomic multi-bit CDC,
+  // one independent leg per direction (dec_clk and tx_clk are separate clock domains)
 
   up_xfer_cntrl #(
     .DATA_WIDTH (RATE_WIDTH + 1)
   ) i_xfer_cntrl (
     .up_rstn (up_rstn),
     .up_clk (up_clk),
-    .up_data_cntrl ({up_cic_bypass, up_cic_rate}),
+    .up_data_cntrl ({up_rx_cic_bypass, up_rx_cic_rate}),
     .up_xfer_done (),
     .d_rst (1'b0),
     .d_clk (clk),
     .d_data_cntrl ({dec_bypass, dec_rate}));
+
+  up_xfer_cntrl #(
+    .DATA_WIDTH (RATE_WIDTH + 1)
+  ) i_tx_xfer_cntrl (
+    .up_rstn (up_rstn),
+    .up_clk (up_clk),
+    .up_data_cntrl ({up_tx_cic_bypass, up_tx_cic_rate}),
+    .up_xfer_done (),
+    .d_rst (1'b0),
+    .d_clk (tx_clk),
+    .d_data_cntrl ({tx_dec_bypass, tx_dec_rate}));
 
 endmodule

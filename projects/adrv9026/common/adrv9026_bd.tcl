@@ -172,15 +172,19 @@ ad_ip_instance util_cpack2 util_adrv9026_rx_cpack [list \
   SAMPLE_DATA_WIDTH $RX_SAMPLE_WIDTH \
   ]
 
-# rx cic decimation (default = bypass, single-link/RX-OBS-disabled datapath only)
+# rx/tx cic decimation/interpolation (default = bypass, single-link/RX-OBS-disabled datapath only)
 
 set RX_CIC_RATE_WIDTH 8
+set TX_CIC_RATE_WIDTH 8
 
-ad_ip_instance axi_cic_decimate_ctrl axi_adrv9026_rx_decimate_ctrl
-ad_connect  adrv9026_rx_device_clk axi_adrv9026_rx_decimate_ctrl/dec_clk
+ad_ip_instance axi_cic_decimate_ctrl axi_adrv9026_cic_ctrl
+ad_connect  adrv9026_rx_device_clk axi_adrv9026_cic_ctrl/dec_clk
+ad_connect  adrv9026_tx_device_clk axi_adrv9026_cic_ctrl/tx_clk
 
 ad_add_cic_decimation_filter rx_cic_decimator $RX_NUM_OF_CONVERTERS 5 1 \
                               $RX_SAMPLE_WIDTH 4 32 4 $RX_CIC_RATE_WIDTH
+ad_add_cic_interpolation_filter tx_cic_interpolator $TX_NUM_OF_CONVERTERS 5 1 \
+                                 $TX_SAMPLE_WIDTH 4 32 4 $TX_CIC_RATE_WIDTH
 
 adi_tpl_jesd204_rx_create rx_adrv9026_tpl_core $RX_NUM_OF_LANES \
                                                $RX_NUM_OF_CONVERTERS \
@@ -368,12 +372,20 @@ ad_connect  axi_adrv9026_tx_jesd/tx_data tx_adrv9026_tpl_core/link
 ad_connect  adrv9026_tx_device_clk util_adrv9026_tx_upack/clk
 ad_connect  adrv9026_tx_device_clk_rstgen/peripheral_reset util_adrv9026_tx_upack/reset
 
+ad_connect  adrv9026_tx_device_clk tx_cic_interpolator/aclk
+ad_connect  adrv9026_tx_device_clk_rstgen/peripheral_aresetn tx_cic_interpolator/aresetn
+ad_connect  axi_adrv9026_cic_ctrl/tx_dec_bypass tx_cic_interpolator/bypass
+ad_connect  axi_adrv9026_cic_ctrl/tx_dec_rate tx_cic_interpolator/rate
+ad_connect  tx_cic_interpolator/busy axi_adrv9026_cic_ctrl/tx_dec_busy
+ad_connect  tx_adrv9026_tpl_core/dac_valid_0 tx_cic_interpolator/full_rate_strobe
+
 for {set i 0} {$i < $TX_NUM_OF_CONVERTERS} {incr i} {
   ad_connect  tx_adrv9026_tpl_core/dac_enable_$i util_adrv9026_tx_upack/enable_$i
-  ad_connect  util_adrv9026_tx_upack/fifo_rd_data_$i tx_adrv9026_tpl_core/dac_data_$i
+  ad_connect  util_adrv9026_tx_upack/fifo_rd_data_$i tx_cic_interpolator/data_in_$i
+  ad_connect  tx_cic_interpolator/data_out_$i tx_adrv9026_tpl_core/dac_data_$i
 }
 
-ad_connect  tx_adrv9026_tpl_core/dac_valid_0  util_adrv9026_tx_upack/fifo_rd_en
+ad_connect  tx_cic_interpolator/fifo_rd_en util_adrv9026_tx_upack/fifo_rd_en
 ad_connect  adrv9026_tx_device_clk $dac_offload_name/m_axis_aclk
 ad_connect  adrv9026_tx_device_clk_rstgen/peripheral_aresetn $dac_offload_name/m_axis_aresetn
 ad_connect  util_adrv9026_tx_upack/s_axis $dac_offload_name/m_axis
@@ -397,9 +409,9 @@ ad_connect  adrv9026_rx_device_clk_rstgen/peripheral_reset util_adrv9026_rx_cpac
 
 ad_connect  adrv9026_rx_device_clk rx_cic_decimator/aclk
 ad_connect  adrv9026_rx_device_clk_rstgen/peripheral_aresetn rx_cic_decimator/aresetn
-ad_connect  axi_adrv9026_rx_decimate_ctrl/dec_bypass rx_cic_decimator/bypass
-ad_connect  axi_adrv9026_rx_decimate_ctrl/dec_rate rx_cic_decimator/rate
-ad_connect  rx_cic_decimator/busy axi_adrv9026_rx_decimate_ctrl/dec_busy
+ad_connect  axi_adrv9026_cic_ctrl/dec_bypass rx_cic_decimator/bypass
+ad_connect  axi_adrv9026_cic_ctrl/dec_rate rx_cic_decimator/rate
+ad_connect  rx_cic_decimator/busy axi_adrv9026_cic_ctrl/dec_busy
 
 for {set i 0} {$i < $RX_NUM_OF_CONVERTERS} {incr i} {
   ad_connect  rx_adrv9026_tpl_core/adc_enable_$i util_adrv9026_rx_cpack/enable_$i
@@ -451,7 +463,7 @@ ad_cpu_interconnect 0x44A90000 axi_adrv9026_tx_jesd
 ad_cpu_interconnect 0x7C420000 axi_adrv9026_tx_dma
 ad_cpu_interconnect 0x44A60000 axi_adrv9026_rx_xcvr
 ad_cpu_interconnect 0x44AA0000 axi_adrv9026_rx_jesd
-ad_cpu_interconnect 0x44AB0000 axi_adrv9026_rx_decimate_ctrl
+ad_cpu_interconnect 0x44AB0000 axi_adrv9026_cic_ctrl
 ad_cpu_interconnect 0x7C400000 axi_adrv9026_rx_dma
 ad_cpu_interconnect 0x43C10000 axi_adrv9026_rx_clkgen
 ad_cpu_interconnect 0x43C00000 axi_adrv9026_tx_clkgen

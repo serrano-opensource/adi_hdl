@@ -46,6 +46,11 @@ module axi_cic_decimate_ctrl #(
   output                    dec_bypass,
   input                     dec_busy,
 
+  input                     tx_clk,
+  output  [RATE_WIDTH-1:0]  tx_dec_rate,
+  output                    tx_dec_bypass,
+  input                     tx_dec_busy,
+
   // axi interface
 
   input                     s_axi_aclk,
@@ -97,6 +102,11 @@ module axi_cic_decimate_ctrl #(
     .dec_rate (dec_rate),
     .dec_bypass (dec_bypass),
     .dec_busy (dec_busy),
+
+    .tx_clk (tx_clk),
+    .tx_dec_rate (tx_dec_rate),
+    .tx_dec_bypass (tx_dec_bypass),
+    .tx_dec_busy (tx_dec_busy),
 
     .up_rstn (up_rstn),
     .up_clk (up_clk),

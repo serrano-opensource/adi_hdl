@@ -21,5 +21,6 @@ adi_ip_properties axi_cic_decimate_ctrl
 set_property company_url {https://wiki.analog.com/resources/fpga/docs/axi_cic_decimate_ctrl} [ipx::current_core]
 
 ipx::infer_bus_interface dec_clk xilinx.com:signal:clock_rtl:1.0 [ipx::current_core]
+ipx::infer_bus_interface tx_clk xilinx.com:signal:clock_rtl:1.0 [ipx::current_core]
 
 ipx::save_core [ipx::current_core]
