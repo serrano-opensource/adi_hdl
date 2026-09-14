@@ -177,13 +177,24 @@ ad_ip_instance util_cpack2 util_adrv9026_rx_cpack [list \
 set RX_CIC_RATE_WIDTH 8
 set TX_CIC_RATE_WIDTH 8
 
+# Resource/BOM knob: only this many of the RX_NUM_OF_CONVERTERS /
+# TX_NUM_OF_CONVERTERS real channels get actual cic_compiler hardware (the
+# rest always pass raw data through in bypass mode, and output zero when
+# decimation/interpolation is enabled). Real converter indices are
+# interleaved I/Q pairs of complex channels (index i = complex channel i/2,
+# I if even, Q if odd), so 2 active channels = complex channel 0 (I0/Q0)
+# only. Raise to $RX_NUM_OF_CONVERTERS / $TX_NUM_OF_CONVERTERS to reinstate
+# CIC hardware on every channel.
+set RX_CIC_ACTIVE_CHANNELS 2
+set TX_CIC_ACTIVE_CHANNELS 2
+
 ad_ip_instance axi_cic_decimate_ctrl axi_adrv9026_cic_ctrl
 ad_connect  adrv9026_rx_device_clk axi_adrv9026_cic_ctrl/dec_clk
 ad_connect  adrv9026_tx_device_clk axi_adrv9026_cic_ctrl/tx_clk
 
-ad_add_cic_decimation_filter rx_cic_decimator $RX_NUM_OF_CONVERTERS 5 1 \
+ad_add_cic_decimation_filter rx_cic_decimator $RX_NUM_OF_CONVERTERS $RX_CIC_ACTIVE_CHANNELS 5 1 \
                               $RX_SAMPLE_WIDTH 4 32 4 $RX_CIC_RATE_WIDTH
-ad_add_cic_interpolation_filter tx_cic_interpolator $TX_NUM_OF_CONVERTERS 5 1 \
+ad_add_cic_interpolation_filter tx_cic_interpolator $TX_NUM_OF_CONVERTERS $TX_CIC_ACTIVE_CHANNELS 5 1 \
                                  $TX_SAMPLE_WIDTH 4 32 4 $TX_CIC_RATE_WIDTH
 
 adi_tpl_jesd204_rx_create rx_adrv9026_tpl_core $RX_NUM_OF_LANES \

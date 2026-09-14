@@ -76,10 +76,12 @@ this project directory):
 
 - New block-design proc `ad_add_cic_decimation_filter` (RX) and its TX
   counterpart `ad_add_cic_interpolation_filter`, both in
-  `projects/common/xilinx/adi_cic_filter_bd.tcl`, each instantiate 8
+  `projects/common/xilinx/adi_cic_filter_bd.tcl`, each instantiate up to 8
   independent single-channel Xilinx CIC Compiler v4.0 cores (one per real I/Q
-  channel) with a 2-way bypass mux (`library/common/ad_bus_mux.v`) per
-  channel, and share one small sequencer module
+  channel; see "Resource-reduction follow-on" below for how only a subset of
+  these actually get real hardware in the current default configuration) with
+  a 2-way bypass mux (`library/common/ad_bus_mux.v`) per channel, and share
+  one small sequencer module
   (`projects/common/xilinx/cic_cfg_seq.v`, reused unchanged for both
   directions) that broadcasts the rate to all 8 CIC cores via their
   `s_axis_config` channel and issues a brief reset pulse whenever the rate
@@ -133,6 +135,87 @@ this project directory):
   infrequent, deliberate, operator-triggered event, and both bypass mode and
   steady-state interpolation are unaffected.
 
+## Resource-reduction follow-on: single active channel per direction
+
+After the TX interpolation feature above was hardware-verified, a follow-on
+change reduced FPGA resource usage by giving real `cic_compiler` hardware to
+only a subset of the 8 real (I/Q) channels per direction, rather than all 8.
+This was motivated purely by BOM/resource cost: the 16 `cic_compiler`
+instances (8 RX + 8 TX) from the fully-populated design were, at ~8 DSP48E2
+slices each, the dominant resource cost of this whole feature (128 DSP48E2
+used in the fully-populated, hardware-verified build — see "Build status"
+below for the before/after utilization numbers).
+
+- **What "one channel" means.** In this project's terminology (from
+  `cic_prompt.txt`/`cic_interp_prompt.txt`: "4 complex channels", "8 channels
+  (4 complex channels each having I & Q data)"), one **complex** channel is
+  both its I and Q real converters together — filtering I but not Q at the
+  same rate would corrupt the complex signal. The 8 real converter indices
+  are **interleaved** I/Q pairs, not grouped: real converter index `i`
+  belongs to complex channel `i/2`, I if `i` is even, Q if `i` is odd. This
+  mapping is confirmed via the paired Linux IIO driver (`adrv9025_conv.c` for
+  RX, `cf_axi_dds.c` for TX — outside this HDL repo, and not documented
+  anywhere in it). So keeping real indices `{0,1}` active means complex
+  channel 0 (I0/Q0) gets real CIC hardware.
+- **New parameter.** Both `ad_add_cic_decimation_filter` and
+  `ad_add_cic_interpolation_filter` (in
+  `projects/common/xilinx/adi_cic_filter_bd.tcl`) take a new second
+  positional argument, `n_active_chan`, alongside the existing `n_chan`
+  (total channel count). For real channel index `i < n_active_chan`,
+  everything is unchanged: a real `cic_compiler` instance is instantiated and
+  wired exactly as before. For `i >= n_active_chan`, no `cic_compiler`
+  instance is created at all — this is where the DSP/LUT savings come from.
+  `projects/adrv9026/common/adrv9026_bd.tcl` sets `RX_CIC_ACTIVE_CHANNELS`
+  and `TX_CIC_ACTIVE_CHANNELS` to `2` (i.e. real indices `0`/`1`, complex
+  channel 0 only) at both call sites; raising either back to 8 restores full
+  8-channel CIC hardware for that direction with no other code changes.
+- **Mechanism — repoint one mux input, no new control logic.** Every
+  channel, active or not, already had a per-channel 2-way bypass mux
+  (`out_mux_$i`, `library/common/ad_bus_mux.v`) whose `select_path` is driven
+  by `bypass` and whose two inputs are the real CIC output (`data_in_0`, and
+  on RX also `valid_in_0`) and the raw passthrough (`data_in_1`). For
+  `i >= n_active_chan`, `data_in_0` (RX: and `valid_in_0`) is tied to a
+  constant `GND` instead of being driven from a per-channel CIC core; the
+  passthrough input and `select_path` are untouched for every channel. This
+  single existing mux already gives exactly the desired behavior once its
+  zero-rate input is repointed:
+  - **`bypass = 1` (default)**: all 8 real channels pass raw data through
+    unchanged, exactly as before this change — inactive channels are
+    indistinguishable from active ones in bypass mode.
+  - **`bypass = 0`**: active channels (real indices `0`/`1`) output a real
+    decimated/interpolated value; every other channel outputs a constant
+    zero.
+  - Every top-level hier pin (`valid_in_$i`/`enable_in_$i`/`valid_out_$i`/
+    `enable_out_$i`/`data_in_$i`/`data_out_$i`) is still created for every
+    index `0..n_chan-1` regardless of active/inactive, so the DMA-facing
+    wiring in `adrv9026_bd.tcl`, the register map, and the software view are
+    all bit-for-bit unchanged. `cic_cfg_seq` and (on TX) `rden_mux` needed no
+    changes: both already only reference index 0, which remains active.
+- **A real bug found and fixed while implementing this.** Tying `data_in_0`/
+  `valid_in_0` to `GND` for an inactive channel connects a root-level
+  constant cell directly into a pin nested two hierarchy levels down
+  (`$name/out_mux_$i/data_in_0`, where `out_mux_$i` is a child cell of the
+  filter's own hierarchy `$name`). The first time this happens for a given
+  constant width, Vivado's `connect_bd_net` silently auto-creates a hidden
+  boundary pin on `$name` to route the signal in, named after the
+  destination's own leaf pin name with an auto-incrementing suffix on
+  collision (e.g. tying `out_mux_1/valid_in_0` to `GND` auto-created a
+  phantom pin literally named `valid_in_2` on the filter hierarchy) — which
+  then collided with this same loop's own `create_bd_pin` call for that
+  later channel index, failing with `Specified object '.../valid_in_2'
+  already exists`. This was reproduced in isolation (a minimal standalone
+  block design hitting the identical failure) before being root-caused.
+  Fixed by wrapping the per-channel `GND` ties in both procs with
+  `current_bd_instance [get_bd_cells $name]` / `current_bd_instance /`, so
+  the constant cell is created *inside* the filter's own hierarchy instead
+  of crossing into it — same-level connections don't trigger Vivado's
+  auto-boundary-pin behavior. This is a latent Vivado behavior, not
+  something specific to `n_active_chan`; the pre-existing (unconditional)
+  `GND` ties in the TX interpolator's `rden_mux` setup and per-channel loop
+  hit the same mechanism but happened to reuse an already-created constant
+  cell (from an unrelated earlier tie) in every case that mattered, so they
+  never collided with a real pin name and were left as-is.
+
 ## AXI-lite control registers (`axi_cic_decimate_ctrl`, instantiated as `axi_adrv9026_cic_ctrl`)
 
 - HDL/Vivado base address: `0x44AB0000`
@@ -159,7 +242,12 @@ Notes:
   interfere with each other.
 - RX and TX rates/bypass are fully independent — setting one does not affect
   the other. All 4 complex channels within a given direction always share
-  that direction's single rate register; there is no per-channel rate.
+  that direction's single rate register; there is no per-channel rate. Since
+  the "Resource-reduction follow-on" change below, only the active
+  channel(s) actually have real CIC hardware to apply this rate to — the
+  rate register still exists and is still written the same way for every
+  channel, but has no observable effect on inactive channels (they output
+  zero whenever bypass is disabled, regardless of rate).
 - Example (Linux userspace, root, `CONFIG_STRICT_DEVMEM` permitting): set the
   RX decimation rate to 8 and disable RX bypass —
   ```
@@ -242,11 +330,120 @@ Notes:
    constraints are met." This also confirms the `axi_dmac` timing miss from
    the intermediate build was placement noise from the larger netlist, not
    a fundamental conflict: the smaller, cleaner netlist from the
-   `cic_cfg_seq` fix closed timing again on its own. **Still outstanding**:
+   `cic_cfg_seq` fix closed timing again on its own. This build's
+   utilization report (`system_top_utilization_placed.rpt`) is the
+   fully-populated (8 active channels per direction) baseline referenced in
+   "Resource-reduction follow-on" above: **128 DSP48E2 used, 16
+   `cic_decimator_*`/`cic_interpolator_*` instances**. **Still outstanding**:
    a hardware retest repeating the original tone-injection measurement, to
    confirm the `SamplePeriod` fix actually produces the correct frequency
    at each rate (everything above is build/synthesis-level verification
    only).
+9. Resource-reduction follow-on (`RX_CIC_ACTIVE_CHANNELS`/
+   `TX_CIC_ACTIVE_CHANNELS = 2`, i.e. one active complex channel per
+   direction): BD-level validation (`validate_bd_design` plus
+   `generate_target`, isolated scratch project) passed with 0 errors and
+   only 4 critical warnings — the same benign "reset pin ... asynchronous
+   reset source" `validate_bd_design`-time heuristic seen throughout this
+   feature's earlier builds, now one per active `cic_compiler` instance (2
+   RX + 2 TX, down from 8 + 8).
+
+   A full synthesis/implementation/bitstream rebuild (`make ORX_ENABLE=0`)
+   confirmed the resource savings — **44 DSP48E2 used, 4
+   `cic_decimator_*`/`cic_interpolator_*` instances**, down from the
+   fully-populated baseline's 128 DSP48E2 / 16 instances (item 8 above) —
+   with 0 errors and 0 critical warnings, and `write_bitstream` completed
+   successfully. The first attempt with this project's existing
+   `Performance_RefinePlacement` implementation strategy, however, narrowly
+   **missed timing**: WNS = -0.018 ns, TNS = -0.075 ns, 7 failing endpoints,
+   all on the same stock, unmodified `axi_adrv9026_tx_dma` internal
+   store-and-forward path already called out as a pre-existing, tight-margin
+   path in item 7 above — the smaller CIC netlist shifted placement enough
+   to eat into that margin again, the same mechanism as before but landing
+   unfavorably this time instead of favorably. Per item 8's own prediction
+   ("a timing-driven implementation strategy change would be the next thing
+   to try"), that's what closed it: re-running implementation (place, route,
+   bitstream — from the same synthesized netlist, so equivalent to a full
+   rebuild) with strategy `Performance_ExplorePostRoutePhysOpt` in place of
+   `Performance_RefinePlacement` closed timing cleanly — WNS = +0.013 ns,
+   TNS = 0.000 ns, 0 failing endpoints, 0 critical warnings.
+   `projects/adrv9026/zcu102/system_project.tcl`'s `set_property strategy`
+   line was updated to this new strategy so a plain `make`/`make
+   ORX_ENABLE=0` closes timing on the reduced-channel design without a
+   manual re-run.
+
+   A real Vivado BD-scripting bug was also found and fixed while
+   implementing this: see "Resource-reduction follow-on" above ("A real bug
+   found and fixed while implementing this") for the cross-hierarchy `GND`
+   auto-boundary-pin issue and its fix.
+
+   **Still outstanding**: the hardware retest described in the
+   "Verification" section of this change (channel 0 still correct, bypass
+   still passes all 8 channels, inactive channels read back as zero with
+   bypass disabled) — see item 10 below for a related hardware finding
+   made while pursuing this.
+
+10. **Hardware regression found and fixed: `axi_adrv9026_cic_ctrl`
+    (`axi_cic_decimate_ctrl`) became completely unresponsive on real
+    hardware after item 9's resource reduction, root-caused to a missing
+    CDC timing constraint — not a logic bug.** After flashing item 9's
+    bitstream, `devmem` reads/writes to `axi_adrv9026_cic_ctrl`'s registers
+    (base `0x84AB0000`) failed with a bus error on read and a kernel panic
+    on write, at every offset tried (including `VERSION`, a pure
+    combinational readback) — while other, unrelated PL peripherals on the
+    same PS AXI-lite master port (`M_AXI_HPM0_LPD`) continued to work fine.
+    Extensive static analysis (BD address-map export, routed-checkpoint
+    netlist inspection of `axi_adrv9026_cic_ctrl`'s reset/clock/AXI-handshake
+    signals) found nothing wrong — reset, clock, and every `s_axi_*`
+    handshake signal were driven normally, none tied to a constant. A
+    bisection rebuild (isolated to a throwaway git worktree, restoring
+    `RX_CIC_ACTIVE_CHANNELS`/`TX_CIC_ACTIVE_CHANNELS` to 8 while keeping
+    everything else from item 9 identical) confirmed `devmem` worked
+    correctly with the full 8-channel CIC hardware present, proving the
+    regression was caused specifically by the channel-count reduction
+    itself, not the `Performance_ExplorePostRoutePhysOpt` strategy change
+    from item 9.
+
+    Root cause: `library/axi_cic_decimate_ctrl/axi_cic_decimate_ctrl_ip.tcl`
+    never included `library/xilinx/common/up_xfer_cntrl_constr.xdc` — the
+    standard constraint file that declares `ASYNC_REG TRUE` on the
+    toggle-synchronizer flops in `library/common/up_xfer_cntrl.v` and
+    excepts the crossing with `set_false_path`. Every other IP in this
+    repo that reuses `up_xfer_cntrl.v` (e.g. `axi_ad9265`, `axi_adc_trigger`,
+    dozens of others) bundles this constraint file alongside the source;
+    `axi_cic_decimate_ctrl` (added in this feature's Phase B, well before
+    the resource-reduction work) never did. Without `ASYNC_REG`, Vivado's
+    placer had no reason to keep `axi_adrv9026_cic_ctrl`'s two
+    `up_xfer_cntrl` instances' synchronizer stages (`i_xfer_cntrl` for RX,
+    `i_tx_xfer_cntrl` for TX) physically close together, and without
+    `set_false_path`, the crossing between `up_clk` and `dec_clk`/`tx_clk`
+    was left for ordinary (and, for a genuine clock-domain crossing,
+    inappropriate) timing analysis rather than being properly excepted.
+    This latent gap had been present since Phase B and evidently never
+    caused an observable failure until the resource reduction's much
+    smaller CIC netlist (128 → 44 DSP48E2) shifted the floorplan enough to
+    expose it, deterministically wedging the peripheral's AXI-lite
+    interface on every access.
+
+    Fix: added
+    `"$ad_hdl_dir/library/xilinx/common/up_xfer_cntrl_constr.xdc"` to
+    `axi_cic_decimate_ctrl_ip.tcl`'s `adi_ip_files` list, matching the
+    established repo convention. Verified the library IP repackages with
+    the constraint file present (`component.xml` now references it), then
+    rebuilt the full 2-active-channel design: **0 errors, 0 critical
+    warnings** (even better than item 9's build — the previously-seen
+    benign "reset pin ... asynchronous reset source" warnings are gone
+    too, plausibly because the `ASYNC_REG` declaration also satisfies that
+    heuristic), and timing margin *improved* to **WNS = +0.048 ns** (up
+    from item 9's +0.013 ns) — consistent with the missing exception
+    having forced the tool to spend effort trying to satisfy an
+    inappropriate synchronous timing requirement on those CDC paths.
+    DSP48E2/instance counts unchanged from item 9 (44 DSP48E2, 4
+    instances). **Confirmed on real hardware**: `devmem 0x84ab0040 32`
+    reads and writes both work correctly with this build. The full
+    tone-injection hardware retest from item 9's "Still outstanding" is
+    still pending, but the specific regression this item describes is
+    resolved.
 
 ## Known issues (fixed)
 

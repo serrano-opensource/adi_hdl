@@ -16,7 +16,11 @@
 # reset pulse to the CIC cores whenever the rate changes.
 #
 # \param[name] - Subsystem name
-# \param[n_chan] - Number of channels to filter
+# \param[n_chan] - Number of channels the subsystem exposes at its top level
+# \param[n_active_chan] - Number of leading channels (0..n_active_chan-1) that get
+# real cic_compiler hardware; the rest (n_active_chan..n_chan-1) have no CIC core at
+# all and instead output a constant zero whenever bypass is disabled (they still pass
+# raw data through when bypass is enabled, same as every other channel)
 # \param[number_of_stages] - CIC number of stages (N)
 # \param[differential_delay] - CIC differential delay (M)
 # \param[data_width] - Input/output sample width, in bits
@@ -26,9 +30,13 @@
 # \param[rate_width] - Width, in bits, of the rate value/config channel (must match
 # the control peripheral driving the "rate" pin, and the generated cic_compiler's
 # s_axis_config_tdata width for the chosen Maximum_Rate)
-proc ad_add_cic_decimation_filter {name n_chan number_of_stages differential_delay \
+proc ad_add_cic_decimation_filter {name n_chan n_active_chan number_of_stages differential_delay \
                                     data_width min_rate max_rate init_rate rate_width} {
   global ad_hdl_dir
+
+  if {$n_active_chan < 1 || $n_active_chan > $n_chan} {
+    error "ad_add_cic_decimation_filter: n_active_chan ($n_active_chan) must satisfy 1 <= n_active_chan <= n_chan ($n_chan)"
+  }
 
   create_bd_cell -type hier $name
   set filter_name "cic_decimator"
@@ -52,36 +60,40 @@ proc ad_add_cic_decimation_filter {name n_chan number_of_stages differential_del
   ad_connect $name/rate $name/cfg_seq/rate
   ad_connect $name/cfg_seq/busy $name/busy
 
-  # add filter instances for n channels
+  # add filter instances for n_active_chan of the n_chan channels; channels
+  # n_active_chan..n_chan-1 have no CIC hardware at all and output a constant
+  # zero instead whenever bypass is disabled (see out_mux wiring below)
   for {set i 0} {$i < $n_chan} {incr i} {
-    ad_ip_instance cic_compiler $name/${filter_name}_${i} [ list \
-      Filter_Type          Decimation \
-      Number_Of_Stages     $number_of_stages \
-      Differential_Delay   $differential_delay \
-      Number_Of_Channels   1 \
-      Sample_Rate_Changes  Programmable \
-      Fixed_Or_Initial_Rate $init_rate \
-      Minimum_Rate         $min_rate \
-      Maximum_Rate         $max_rate \
-      RateSpecification    Sample_Period \
-      SamplePeriod         1 \
-      Input_Data_Width     $data_width \
-      Quantization         Truncation \
-      Output_Data_Width    $data_width \
-      Use_Xtreme_DSP_Slice true \
-      HAS_DOUT_TREADY      false \
-      HAS_ACLKEN           false \
-      HAS_ARESETN          true \
-    ]
+    if {$i < $n_active_chan} {
+      ad_ip_instance cic_compiler $name/${filter_name}_${i} [ list \
+        Filter_Type          Decimation \
+        Number_Of_Stages     $number_of_stages \
+        Differential_Delay   $differential_delay \
+        Number_Of_Channels   1 \
+        Sample_Rate_Changes  Programmable \
+        Fixed_Or_Initial_Rate $init_rate \
+        Minimum_Rate         $min_rate \
+        Maximum_Rate         $max_rate \
+        RateSpecification    Sample_Period \
+        SamplePeriod         1 \
+        Input_Data_Width     $data_width \
+        Quantization         Truncation \
+        Output_Data_Width    $data_width \
+        Use_Xtreme_DSP_Slice true \
+        HAS_DOUT_TREADY      false \
+        HAS_ACLKEN           false \
+        HAS_ARESETN          true \
+      ]
 
-    ad_connect $name/aclk $name/${filter_name}_${i}/aclk
-    ad_connect $name/cfg_seq/cic_aresetn $name/${filter_name}_${i}/aresetn
-    ad_connect $name/cfg_seq/cfg_tdata $name/${filter_name}_${i}/s_axis_config_tdata
-    ad_connect $name/cfg_seq/cfg_tvalid $name/${filter_name}_${i}/s_axis_config_tvalid
+      ad_connect $name/aclk $name/${filter_name}_${i}/aclk
+      ad_connect $name/cfg_seq/cic_aresetn $name/${filter_name}_${i}/aresetn
+      ad_connect $name/cfg_seq/cfg_tdata $name/${filter_name}_${i}/s_axis_config_tdata
+      ad_connect $name/cfg_seq/cfg_tvalid $name/${filter_name}_${i}/s_axis_config_tvalid
 
-    if {$i == 0} {
-      # all channels use identical config/timing, so watch only channel 0's tready
-      ad_connect $name/${filter_name}_0/s_axis_config_tready $name/cfg_seq/cfg_tready
+      if {$i == 0} {
+        # all active channels use identical config/timing, so watch only channel 0's tready
+        ad_connect $name/${filter_name}_0/s_axis_config_tready $name/cfg_seq/cfg_tready
+      }
     }
 
     create_bd_pin -dir I $name/valid_in_$i
@@ -91,19 +103,37 @@ proc ad_add_cic_decimation_filter {name n_chan number_of_stages differential_del
     create_bd_pin -dir I -from [expr $data_width-1] -to 0 $name/data_in_$i
     create_bd_pin -dir O -from [expr $data_width-1] -to 0 $name/data_out_$i
 
-    ad_connect $name/valid_in_$i $name/${filter_name}_${i}/s_axis_data_tvalid
-    ad_connect $name/data_in_$i $name/${filter_name}_${i}/s_axis_data_tdata
-
     create_bd_cell -type module -reference ad_bus_mux $name/out_mux_$i
     set_property -dict [list \
       CONFIG.DATA_WIDTH $data_width] [get_bd_cells $name/out_mux_$i]
 
-    # data_in_0/select_path=0 = decimated CIC output (default reset value of "bypass"
-    # is 1, so select_path=1/data_in_1 = raw passthrough is what's selected at reset,
-    # matching today's undecimated behavior with zero extra logic)
-    ad_connect $name/${filter_name}_${i}/m_axis_data_tvalid $name/out_mux_${i}/valid_in_0
+    # data_in_0/select_path=0 = decimated CIC output for active channels
+    # (i < n_active_chan), or a constant zero for channels with no CIC
+    # hardware (i >= n_active_chan). select_path=1/data_in_1 = raw
+    # passthrough for every channel, active or not (default reset value of
+    # "bypass" is 1, so data_in_1 is what's selected at reset, matching
+    # today's undecimated behavior with zero extra logic).
+    if {$i < $n_active_chan} {
+      ad_connect $name/valid_in_$i $name/${filter_name}_${i}/s_axis_data_tvalid
+      ad_connect $name/data_in_$i $name/${filter_name}_${i}/s_axis_data_tdata
+
+      ad_connect $name/${filter_name}_${i}/m_axis_data_tvalid $name/out_mux_${i}/valid_in_0
+      ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/out_mux_${i}/data_in_0
+    } else {
+      # scoped to the hierarchy's own current_bd_instance: connect_bd_net
+      # between a root-level constant and a pin nested inside $name (e.g.
+      # $name/out_mux_$i/valid_in_0) silently auto-creates a hidden
+      # boundary pin on $name to route the signal in, named after the
+      # destination's own leaf pin name (incrementing on collision) --
+      # which then collides with this loop's own create_bd_pin calls for
+      # later channel indices. Creating the constant inside $name's own
+      # hierarchy keeps the connection same-level and avoids that.
+      current_bd_instance [get_bd_cells $name]
+      ad_connect GND out_mux_${i}/valid_in_0
+      ad_connect GND out_mux_${i}/data_in_0
+      current_bd_instance /
+    }
     ad_connect $name/enable_in_$i $name/out_mux_${i}/enable_in_0
-    ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/out_mux_${i}/data_in_0
 
     ad_connect $name/valid_in_$i $name/out_mux_${i}/valid_in_1
     ad_connect $name/enable_in_$i $name/out_mux_${i}/enable_in_1
@@ -134,7 +164,11 @@ proc ad_add_cic_decimation_filter {name n_chan number_of_stages differential_del
 # be fed a data sample every device-clock cycle unconditionally.
 #
 # \param[name] - Subsystem name
-# \param[n_chan] - Number of channels to filter
+# \param[n_chan] - Number of channels the subsystem exposes at its top level
+# \param[n_active_chan] - Number of leading channels (0..n_active_chan-1) that get
+# real cic_compiler hardware; the rest (n_active_chan..n_chan-1) have no CIC core at
+# all and instead output a constant zero whenever bypass is disabled (they still pass
+# raw data through when bypass is enabled, same as every other channel)
 # \param[number_of_stages] - CIC number of stages (N)
 # \param[differential_delay] - CIC differential delay (M)
 # \param[data_width] - Input/output sample width, in bits
@@ -144,9 +178,13 @@ proc ad_add_cic_decimation_filter {name n_chan number_of_stages differential_del
 # \param[rate_width] - Width, in bits, of the rate value/config channel (must match
 # the control peripheral driving the "rate" pin, and the generated cic_compiler's
 # s_axis_config_tdata width for the chosen Maximum_Rate)
-proc ad_add_cic_interpolation_filter {name n_chan number_of_stages differential_delay \
+proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages differential_delay \
                                        data_width min_rate max_rate init_rate rate_width} {
   global ad_hdl_dir
+
+  if {$n_active_chan < 1 || $n_active_chan > $n_chan} {
+    error "ad_add_cic_interpolation_filter: n_active_chan ($n_active_chan) must satisfy 1 <= n_active_chan <= n_chan ($n_chan)"
+  }
 
   create_bd_cell -type hier $name
   set filter_name "cic_interpolator"
@@ -193,7 +231,9 @@ proc ad_add_cic_interpolation_filter {name n_chan number_of_stages differential_
   ad_connect GND $name/rden_mux/data_in_0
   ad_connect $name/rden_mux/valid_out $name/fifo_rd_en
 
-  # add filter instances for n channels
+  # add filter instances for n_active_chan of the n_chan channels; channels
+  # n_active_chan..n_chan-1 have no CIC hardware at all and output a constant
+  # zero instead whenever bypass is disabled (see out_mux wiring below)
   #
   # SamplePeriod below = "clock cycles between input samples" (pg140). For a
   # Programmable-rate core the static hardware must be sized for the
@@ -202,63 +242,85 @@ proc ad_add_cic_interpolation_filter {name n_chan number_of_stages differential_
   # extra division of (max_rate/min_rate) on top of whatever rate is set at
   # runtime (e.g. 32/4 = 8x too slow at every configured rate).
   for {set i 0} {$i < $n_chan} {incr i} {
-    ad_ip_instance cic_compiler $name/${filter_name}_${i} [ list \
-      Filter_Type          Interpolation \
-      Number_Of_Stages     $number_of_stages \
-      Differential_Delay   $differential_delay \
-      Number_Of_Channels   1 \
-      Sample_Rate_Changes  Programmable \
-      Fixed_Or_Initial_Rate $init_rate \
-      Minimum_Rate         $min_rate \
-      Maximum_Rate         $max_rate \
-      RateSpecification    Sample_Period \
-      SamplePeriod         $min_rate \
-      Input_Data_Width     $data_width \
-      Quantization         Truncation \
-      Output_Data_Width    $data_width \
-      Use_Xtreme_DSP_Slice true \
-      HAS_DOUT_TREADY      false \
-      HAS_ACLKEN           false \
-      HAS_ARESETN          true \
-    ]
+    if {$i < $n_active_chan} {
+      ad_ip_instance cic_compiler $name/${filter_name}_${i} [ list \
+        Filter_Type          Interpolation \
+        Number_Of_Stages     $number_of_stages \
+        Differential_Delay   $differential_delay \
+        Number_Of_Channels   1 \
+        Sample_Rate_Changes  Programmable \
+        Fixed_Or_Initial_Rate $init_rate \
+        Minimum_Rate         $min_rate \
+        Maximum_Rate         $max_rate \
+        RateSpecification    Sample_Period \
+        SamplePeriod         $min_rate \
+        Input_Data_Width     $data_width \
+        Quantization         Truncation \
+        Output_Data_Width    $data_width \
+        Use_Xtreme_DSP_Slice true \
+        HAS_DOUT_TREADY      false \
+        HAS_ACLKEN           false \
+        HAS_ARESETN          true \
+      ]
 
-    ad_connect $name/aclk $name/${filter_name}_${i}/aclk
-    ad_connect $name/cfg_seq/cic_aresetn $name/${filter_name}_${i}/aresetn
-    ad_connect $name/cfg_seq/cfg_tdata $name/${filter_name}_${i}/s_axis_config_tdata
-    ad_connect $name/cfg_seq/cfg_tvalid $name/${filter_name}_${i}/s_axis_config_tvalid
+      ad_connect $name/aclk $name/${filter_name}_${i}/aclk
+      ad_connect $name/cfg_seq/cic_aresetn $name/${filter_name}_${i}/aresetn
+      ad_connect $name/cfg_seq/cfg_tdata $name/${filter_name}_${i}/s_axis_config_tdata
+      ad_connect $name/cfg_seq/cfg_tvalid $name/${filter_name}_${i}/s_axis_config_tvalid
 
-    if {$i == 0} {
-      # all channels use identical config/timing, so watch only channel 0's tready
-      ad_connect $name/${filter_name}_0/s_axis_config_tready $name/cfg_seq/cfg_tready
-      ad_connect $name/${filter_name}_0/s_axis_data_tready $name/rden_mux/valid_in_0
+      if {$i == 0} {
+        # all active channels use identical config/timing, so watch only channel 0's tready
+        ad_connect $name/${filter_name}_0/s_axis_config_tready $name/cfg_seq/cfg_tready
+        ad_connect $name/${filter_name}_0/s_axis_data_tready $name/rden_mux/valid_in_0
+      }
     }
 
     create_bd_pin -dir I -from [expr $data_width-1] -to 0 $name/data_in_$i
     create_bd_pin -dir O -from [expr $data_width-1] -to 0 $name/data_out_$i
 
-    # input side: fifo_rd_data-style buses are held/registered (unchanged until the next
-    # pop), so it's safe to present continuously with tvalid tied high -- the CIC's own
-    # tready (once every R cycles) is what actually paces the pop, via rden_mux above.
-    ad_connect $name/data_in_$i $name/${filter_name}_${i}/s_axis_data_tdata
-    ad_connect VCC $name/${filter_name}_${i}/s_axis_data_tvalid
-
     create_bd_cell -type module -reference ad_bus_mux $name/out_mux_$i
     set_property -dict [list \
       CONFIG.DATA_WIDTH $data_width] [get_bd_cells $name/out_mux_$i]
 
-    # data_in_0 = interpolated (fast-rate) CIC output; data_in_1 = raw passthrough.
-    # bypass reset default (1) selects data_in_1, matching today's uninterpolated TX
-    # behavior with zero extra logic, same convention as the decimator. valid_in_0/1
-    # and enable_in_0/1 are tied off (GND): the downstream JESD204 TX transport layer
-    # has no data-valid input on its per-channel data port, it latches every
-    # device-clock cycle unconditionally, so there is nothing to drive them with, and
-    # valid_out/enable_out are left unconnected (unused outputs) for the same reason.
-    ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/out_mux_${i}/data_in_0
-    ad_connect GND $name/out_mux_${i}/valid_in_0
-    ad_connect GND $name/out_mux_${i}/enable_in_0
+    # data_in_0 = interpolated (fast-rate) CIC output for active channels
+    # (i < n_active_chan), or a constant zero for channels with no CIC
+    # hardware (i >= n_active_chan); data_in_1 = raw passthrough for every
+    # channel. bypass reset default (1) selects data_in_1, matching today's
+    # uninterpolated TX behavior with zero extra logic, same convention as
+    # the decimator. valid_in_0/1 and enable_in_0/1 are tied off (GND) for
+    # every channel: the downstream JESD204 TX transport layer has no
+    # data-valid input on its per-channel data port, it latches every
+    # device-clock cycle unconditionally, so there is nothing to drive them
+    # with, and valid_out/enable_out are left unconnected (unused outputs)
+    # for the same reason.
+    if {$i < $n_active_chan} {
+      # input side: fifo_rd_data-style buses are held/registered (unchanged until the
+      # next pop), so it's safe to present continuously with tvalid tied high -- the
+      # CIC's own tready (once every R cycles) is what actually paces the pop, via
+      # rden_mux above.
+      ad_connect $name/data_in_$i $name/${filter_name}_${i}/s_axis_data_tdata
+      ad_connect VCC $name/${filter_name}_${i}/s_axis_data_tvalid
+
+      ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/out_mux_${i}/data_in_0
+    }
+    # scoped to the hierarchy's own current_bd_instance: connect_bd_net
+    # between a root-level constant and a pin nested inside $name (e.g.
+    # $name/out_mux_$i/valid_in_0) silently auto-creates a hidden boundary
+    # pin on $name to route the signal in, named after the destination's
+    # own leaf pin name (incrementing on collision) -- which can then
+    # collide with this loop's own create_bd_pin calls for later channel
+    # indices. Creating the constants inside $name's own hierarchy keeps
+    # the connections same-level and avoids that.
+    current_bd_instance [get_bd_cells $name]
+    if {$i >= $n_active_chan} {
+      ad_connect GND out_mux_${i}/data_in_0
+    }
+    ad_connect GND out_mux_${i}/valid_in_0
+    ad_connect GND out_mux_${i}/enable_in_0
+    ad_connect GND out_mux_${i}/valid_in_1
+    ad_connect GND out_mux_${i}/enable_in_1
+    current_bd_instance /
     ad_connect $name/data_in_$i $name/out_mux_${i}/data_in_1
-    ad_connect GND $name/out_mux_${i}/valid_in_1
-    ad_connect GND $name/out_mux_${i}/enable_in_1
     ad_connect $name/bypass $name/out_mux_${i}/select_path
     ad_connect $name/out_mux_${i}/data_out $name/data_out_$i
   }

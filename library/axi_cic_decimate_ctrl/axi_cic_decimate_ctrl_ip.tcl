@@ -13,6 +13,7 @@ adi_ip_create axi_cic_decimate_ctrl
 adi_ip_files axi_cic_decimate_ctrl [list \
   "$ad_hdl_dir/library/common/up_axi.v" \
   "$ad_hdl_dir/library/common/up_xfer_cntrl.v" \
+  "$ad_hdl_dir/library/xilinx/common/up_xfer_cntrl_constr.xdc" \
   "axi_cic_decimate_ctrl_reg.v" \
   "axi_cic_decimate_ctrl.v" ]
 
