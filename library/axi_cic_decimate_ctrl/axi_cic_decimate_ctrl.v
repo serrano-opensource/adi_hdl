@@ -36,22 +36,33 @@
 `timescale 1ns/100ps
 
 module axi_cic_decimate_ctrl #(
-  parameter RATE_WIDTH = 8
+  parameter RATE_WIDTH = 8,
+  parameter NUM_TAPS = 24,
+  parameter COEF_WIDTH = 16,
+  parameter ADDR_WIDTH = 6
 ) (
 
-  // decimator control interface (device clock domain)
+  // decimator/FIR control interface (device clock domain)
 
   input                     dec_clk,
   output  [RATE_WIDTH-1:0]  dec_rate,
   output                    dec_bypass,
   input                     dec_busy,
 
-  // axi interface
+  output                    fir_bypass,
+  input                     fir_busy,
+  output                    fir_load,
+  input   [ADDR_WIDTH-1:0]  fir_coef_addr,
+  output  [COEF_WIDTH-1:0]  fir_coef_rdata,
+
+  // axi interface (address width widened 7->8 bits: word address is now
+  // 6 bits to reach the FIR registers up to 0x24, so byte address needs
+  // 2 more bits on top of that)
 
   input                     s_axi_aclk,
   input                     s_axi_aresetn,
   input                     s_axi_awvalid,
-  input       [ 6:0]        s_axi_awaddr,
+  input       [ 7:0]        s_axi_awaddr,
   input       [ 2:0]        s_axi_awprot,
   output                    s_axi_awready,
   input                     s_axi_wvalid,
@@ -62,7 +73,7 @@ module axi_cic_decimate_ctrl #(
   output      [ 1:0]        s_axi_bresp,
   input                     s_axi_bready,
   input                     s_axi_arvalid,
-  input       [ 6:0]        s_axi_araddr,
+  input       [ 7:0]        s_axi_araddr,
   input       [ 2:0]        s_axi_arprot,
   output                    s_axi_arready,
   output                    s_axi_rvalid,
@@ -75,14 +86,14 @@ module axi_cic_decimate_ctrl #(
 
   wire              up_clk;
   wire              up_rstn;
-  wire    [ 4:0]    up_waddr;
+  wire    [ 5:0]    up_waddr;
   wire    [31:0]    up_wdata;
   wire              up_wack;
   wire              up_wreq;
   wire              up_rack;
   wire    [31:0]    up_rdata;
   wire              up_rreq;
-  wire    [ 4:0]    up_raddr;
+  wire    [ 5:0]    up_raddr;
 
   // signal name changes
 
@@ -90,13 +101,22 @@ module axi_cic_decimate_ctrl #(
   assign up_rstn = s_axi_aresetn;
 
   axi_cic_decimate_ctrl_reg #(
-    .RATE_WIDTH (RATE_WIDTH)
+    .RATE_WIDTH (RATE_WIDTH),
+    .NUM_TAPS (NUM_TAPS),
+    .COEF_WIDTH (COEF_WIDTH),
+    .ADDR_WIDTH (ADDR_WIDTH)
   ) i_reg (
     .clk (dec_clk),
 
     .dec_rate (dec_rate),
     .dec_bypass (dec_bypass),
     .dec_busy (dec_busy),
+
+    .fir_bypass (fir_bypass),
+    .fir_busy (fir_busy),
+    .fir_load (fir_load),
+    .fir_coef_addr (fir_coef_addr),
+    .fir_coef_rdata (fir_coef_rdata),
 
     .up_rstn (up_rstn),
     .up_clk (up_clk),
@@ -110,7 +130,7 @@ module axi_cic_decimate_ctrl #(
     .up_rack (up_rack));
 
   up_axi #(
-    .AXI_ADDRESS_WIDTH(7)
+    .AXI_ADDRESS_WIDTH(8)
   ) i_up_axi (
     .up_rstn (up_rstn),
     .up_clk (up_clk),

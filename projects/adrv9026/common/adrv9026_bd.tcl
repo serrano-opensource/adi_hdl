@@ -401,16 +401,43 @@ ad_connect  axi_adrv9026_rx_decimate_ctrl/dec_bypass rx_cic_decimator/bypass
 ad_connect  axi_adrv9026_rx_decimate_ctrl/dec_rate rx_cic_decimator/rate
 ad_connect  rx_cic_decimator/busy axi_adrv9026_rx_decimate_ctrl/dec_busy
 
+ad_connect  axi_adrv9026_rx_decimate_ctrl/fir_bypass rx_cic_decimator/fir_bypass
+ad_connect  rx_cic_decimator/fir_busy axi_adrv9026_rx_decimate_ctrl/fir_busy
+ad_connect  axi_adrv9026_rx_decimate_ctrl/fir_load rx_cic_decimator/fir_load
+ad_connect  rx_cic_decimator/fir_coef_addr axi_adrv9026_rx_decimate_ctrl/fir_coef_addr
+ad_connect  axi_adrv9026_rx_decimate_ctrl/fir_coef_rdata rx_cic_decimator/fir_coef_rdata
+
+# channels 2-7 aren't FIR-filtered yet, but still need their data delayed to
+# match the FIR pair's confirmed C_LATENCY=35 cycles - util_adrv9026_rx_cpack
+# packs all 8 channels on one shared fifo_wr_en strobe, so every channel's
+# data must be ready at the same cycle that strobe fires, regardless of
+# whether that channel is actually filtered.
+add_files -norecurse $ad_hdl_dir/projects/common/xilinx/fir_chan_delay.v
+
 for {set i 0} {$i < $RX_NUM_OF_CONVERTERS} {incr i} {
   ad_connect  rx_adrv9026_tpl_core/adc_enable_$i util_adrv9026_rx_cpack/enable_$i
   ad_connect  rx_adrv9026_tpl_core/adc_valid_0 rx_cic_decimator/valid_in_$i
   ad_connect  rx_adrv9026_tpl_core/adc_enable_$i rx_cic_decimator/enable_in_$i
   ad_connect  rx_adrv9026_tpl_core/adc_data_$i rx_cic_decimator/data_in_$i
-  ad_connect  rx_cic_decimator/data_out_$i util_adrv9026_rx_cpack/fifo_wr_data_$i
+  if {$i < 2} {
+    ad_connect  rx_cic_decimator/fir_data_out_$i util_adrv9026_rx_cpack/fifo_wr_data_$i
+    } else {
+      create_bd_cell -type module -reference fir_chan_delay chan_delay_$i
+      set_property -dict [list \
+        CONFIG.DATA_WIDTH   {16} \
+        CONFIG.DELAY_CYCLES {35} \
+      ] [get_bd_cells chan_delay_$i]
+
+      ad_connect  adrv9026_rx_device_clk chan_delay_$i/clk
+      ad_connect  adrv9026_rx_device_clk_rstgen/peripheral_aresetn chan_delay_$i/aresetn
+      ad_connect  rx_cic_decimator/data_out_$i chan_delay_$i/din
+      ad_connect  chan_delay_$i/dout util_adrv9026_rx_cpack/fifo_wr_data_$i
+    }
 }
+
 ad_connect  $sys_dma_resetn axi_adrv9026_rx_dma/m_dest_axi_aresetn
 
-ad_connect  rx_cic_decimator/valid_out_0 util_adrv9026_rx_cpack/fifo_wr_en
+ad_connect  rx_cic_decimator/fir_valid_out_0 util_adrv9026_rx_cpack/fifo_wr_en
 ad_connect  rx_adrv9026_tpl_core/adc_dovf util_adrv9026_rx_cpack/fifo_wr_overflow
 
 ad_connect  adrv9026_rx_device_clk axi_adrv9026_rx_dma/fifo_wr_clk
