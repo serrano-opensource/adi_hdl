@@ -54,6 +54,11 @@ module axi_cic_decimate_ctrl_reg #(
   input   [ADDR_WIDTH-1:0]    fir_coef_addr,
   output  [COEF_WIDTH-1:0]    fir_coef_rdata,
 
+  input                       tx_clk,
+  output  [RATE_WIDTH-1:0]    tx_dec_rate,
+  output                      tx_dec_bypass,
+  input                       tx_dec_busy,
+
   // bus interface (word address, 6 bits - covers 0x00 to 0x3F, needed
   // since the FIR registers now extend up to 0x24)
 
@@ -74,8 +79,11 @@ module axi_cic_decimate_ctrl_reg #(
   reg     [31:0]              up_version = 32'h00010000;
   reg     [31:0]              up_scratch = 32'h0;
 
-  reg     [RATE_WIDTH-1:0]    up_cic_rate = 'd4;
-  reg                         up_cic_bypass = 1'b1;   // bypass enabled by default/reset
+  reg     [RATE_WIDTH-1:0]    up_rx_cic_rate = 'd4;
+  reg                         up_rx_cic_bypass = 1'b1;   // bypass enabled by default/reset
+
+  reg     [RATE_WIDTH-1:0]    up_tx_cic_rate = 'd4;
+  reg                         up_tx_cic_bypass = 1'b1;   // bypass enabled by default/reset
 
   reg     [ADDR_WIDTH-1:0]    up_coef_ptr = 'd0;
   reg                         up_fir_bypass = 1'b1;   // bypass enabled by default/reset
@@ -90,16 +98,26 @@ module axi_cic_decimate_ctrl_reg #(
 
   assign fir_coef_rdata = coef_mem[fir_coef_addr];
 
-  // busy status readback (dec_clk -> up_clk, single bit, plain 2-FF sync)
+  // busy status readback (dec_clk/tx_clk -> up_clk, single bit, plain 2-FF sync)
 
-  reg                         up_busy_m1 = 1'b0;
-  reg                         up_busy_m2 = 1'b0;
+  reg                         up_rx_busy_m1 = 1'b0;
+  reg                         up_rx_busy_m2 = 1'b0;
+  reg                         up_tx_busy_m1 = 1'b0;
+  reg                         up_tx_busy_m2 = 1'b0;
   reg                         up_fir_busy_m1 = 1'b0;
   reg                         up_fir_busy_m2 = 1'b0;
 
   always @(posedge up_clk) begin
-    up_busy_m1 <= dec_busy;
-    up_busy_m2 <= up_busy_m1;
+    up_rx_busy_m1 <= dec_busy;
+    up_rx_busy_m2 <= up_rx_busy_m1;
+  end
+
+  always @(posedge up_clk) begin
+    up_tx_busy_m1 <= tx_dec_busy;
+    up_tx_busy_m2 <= up_tx_busy_m1;
+  end
+
+  always @(posedge up_clk) begin
     up_fir_busy_m1 <= fir_busy;
     up_fir_busy_m2 <= up_fir_busy_m1;
   end
@@ -121,8 +139,10 @@ module axi_cic_decimate_ctrl_reg #(
     if (up_rstn == 0) begin
       up_wack <= 'd0;
       up_scratch <= 'd0;
-      up_cic_rate <= 'd4;
-      up_cic_bypass <= 1'b1;
+      up_rx_cic_rate <= 'd4;
+      up_rx_cic_bypass <= 1'b1;
+      up_tx_cic_rate <= 'd4;
+      up_tx_cic_bypass <= 1'b1;
       up_coef_ptr <= 'd0;
       up_fir_bypass <= 1'b1;
       up_fir_load_tgl <= 1'b0;
@@ -132,10 +152,16 @@ module axi_cic_decimate_ctrl_reg #(
         up_scratch <= up_wdata;
       end
       if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h10)) begin
-        up_cic_rate <= up_wdata[RATE_WIDTH-1:0];
+        up_rx_cic_rate <= up_wdata[RATE_WIDTH-1:0];
       end
       if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h11)) begin
-        up_cic_bypass <= up_wdata[0];
+        up_rx_cic_bypass <= up_wdata[0];
+      end
+      if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h12)) begin
+        up_tx_cic_rate <= up_wdata[RATE_WIDTH-1:0];
+      end
+      if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h13)) begin
+        up_tx_cic_bypass <= up_wdata[0];
       end
       // FIR_COEF_DATA (0x20): write one coefficient at the current pointer,
       // then advance the pointer. The pointer saturates at NUM_TAPS-1
@@ -179,8 +205,10 @@ module axi_cic_decimate_ctrl_reg #(
         case (up_raddr[5:0])
           6'h00: up_rdata <= up_version;
           6'h01: up_rdata <= up_scratch;
-          6'h10: up_rdata <= {{(32-RATE_WIDTH){1'b0}}, up_cic_rate};
-          6'h11: up_rdata <= {30'h0, up_busy_m2, up_cic_bypass};
+          6'h10: up_rdata <= {{(32-RATE_WIDTH){1'b0}}, up_rx_cic_rate};
+          6'h11: up_rdata <= {30'h0, up_rx_busy_m2, up_rx_cic_bypass};
+          6'h12: up_rdata <= {{(32-RATE_WIDTH){1'b0}}, up_tx_cic_rate};
+          6'h13: up_rdata <= {30'h0, up_tx_busy_m2, up_tx_cic_bypass};
           6'h23: up_rdata <= {30'h0, up_fir_busy_m2, up_fir_bypass};
           6'h24: up_rdata <= {{(32-ADDR_WIDTH){1'b0}}, up_coef_ptr};
           default: up_rdata <= 32'h0;
@@ -198,11 +226,26 @@ module axi_cic_decimate_ctrl_reg #(
   ) i_xfer_cntrl (
     .up_rstn (up_rstn),
     .up_clk (up_clk),
-    .up_data_cntrl ({up_cic_bypass, up_cic_rate}),
+    .up_data_cntrl ({up_rx_cic_bypass, up_rx_cic_rate}),
     .up_xfer_done (),
     .d_rst (1'b0),
     .d_clk (clk),
     .d_data_cntrl ({dec_bypass, dec_rate}));
+
+  // up_clk -> tx_clk transfer of {bypass, rate}, atomic multi-bit CDC,
+  // independent leg from the RX one above (dec_clk and tx_clk are
+  // separate clock domains)
+
+  up_xfer_cntrl #(
+    .DATA_WIDTH (RATE_WIDTH + 1)
+  ) i_tx_xfer_cntrl (
+    .up_rstn (up_rstn),
+    .up_clk (up_clk),
+    .up_data_cntrl ({up_tx_cic_bypass, up_tx_cic_rate}),
+    .up_xfer_done (),
+    .d_rst (1'b0),
+    .d_clk (tx_clk),
+    .d_data_cntrl ({tx_dec_bypass, tx_dec_rate}));
 
   // up_clk -> dec_clk transfer of fir_bypass, same primitive/pattern as
   // above - a slowly-changing level value, unlike the coefficient array.

@@ -55,6 +55,11 @@ module axi_cic_decimate_ctrl #(
   input   [ADDR_WIDTH-1:0]  fir_coef_addr,
   output  [COEF_WIDTH-1:0]  fir_coef_rdata,
 
+  input                     tx_clk,
+  output  [RATE_WIDTH-1:0]  tx_dec_rate,
+  output                    tx_dec_bypass,
+  input                     tx_dec_busy,
+
   // axi interface (address width widened 7->8 bits: word address is now
   // 6 bits to reach the FIR registers up to 0x24, so byte address needs
   // 2 more bits on top of that)
@@ -117,6 +122,10 @@ module axi_cic_decimate_ctrl #(
     .fir_load (fir_load),
     .fir_coef_addr (fir_coef_addr),
     .fir_coef_rdata (fir_coef_rdata),
+    .tx_clk (tx_clk),
+    .tx_dec_rate (tx_dec_rate),
+    .tx_dec_bypass (tx_dec_bypass),
+    .tx_dec_busy (tx_dec_busy),
 
     .up_rstn (up_rstn),
     .up_clk (up_clk),
