@@ -65,6 +65,6 @@ adi_project_files adrv9026_zcu102 [list \
   "$ad_hdl_dir/library/common/ad_iobuf.v" \
   "$ad_hdl_dir/projects/common/zcu102/zcu102_system_constr.xdc" ]
 
-set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
+set_property strategy Performance_Explore [get_runs impl_1]
 
 adi_project_run adrv9026_zcu102
