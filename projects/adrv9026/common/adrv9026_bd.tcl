@@ -388,6 +388,11 @@ ad_connect  adrv9026_tx_device_clk_rstgen/peripheral_aresetn tx_cic_interpolator
 ad_connect  axi_adrv9026_cic_ctrl/tx_dec_bypass tx_cic_interpolator/bypass
 ad_connect  axi_adrv9026_cic_ctrl/tx_dec_rate tx_cic_interpolator/rate
 ad_connect  tx_cic_interpolator/busy axi_adrv9026_cic_ctrl/tx_dec_busy
+ad_connect  axi_adrv9026_cic_ctrl/tx_fir_bypass tx_cic_interpolator/fir_bypass
+ad_connect  tx_cic_interpolator/fir_busy axi_adrv9026_cic_ctrl/tx_fir_busy
+ad_connect  axi_adrv9026_cic_ctrl/tx_fir_load tx_cic_interpolator/fir_load
+ad_connect  tx_cic_interpolator/fir_coef_addr axi_adrv9026_cic_ctrl/tx_fir_coef_addr
+ad_connect  axi_adrv9026_cic_ctrl/tx_fir_coef_rdata tx_cic_interpolator/fir_coef_rdata
 ad_connect  tx_adrv9026_tpl_core/dac_valid_0 tx_cic_interpolator/full_rate_strobe
 
 for {set i 0} {$i < $TX_NUM_OF_CONVERTERS} {incr i} {
@@ -397,6 +402,8 @@ for {set i 0} {$i < $TX_NUM_OF_CONVERTERS} {incr i} {
 }
 
 ad_connect  tx_cic_interpolator/fifo_rd_en util_adrv9026_tx_upack/fifo_rd_en
+ad_connect  util_adrv9026_tx_upack/fifo_rd_valid tx_cic_interpolator/fifo_rd_valid
+ad_connect  util_adrv9026_tx_upack/fifo_rd_underflow tx_cic_interpolator/fifo_rd_underflow
 ad_connect  adrv9026_tx_device_clk $dac_offload_name/m_axis_aclk
 ad_connect  adrv9026_tx_device_clk_rstgen/peripheral_aresetn $dac_offload_name/m_axis_aresetn
 ad_connect  util_adrv9026_tx_upack/s_axis $dac_offload_name/m_axis

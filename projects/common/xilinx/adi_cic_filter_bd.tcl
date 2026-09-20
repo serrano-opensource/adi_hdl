@@ -53,7 +53,7 @@ proc ad_add_cic_decimation_filter {name n_chan n_active_chan number_of_stages di
   # 47-tap symmetric placeholder: unity gain, center tap only (index 23 of 0-46).
   # Real droop-correction taps get computed separately and pushed in later via
   # the reload sequencer (not yet built) - this seed only matters pre-reload.
-  set init_coeff_vector "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+  set init_coeff_vector [join [lreplace [lrepeat 47 0] 23 23 16384] ","]
 
   create_bd_pin -dir I $name/aclk
   create_bd_pin -dir I $name/aresetn
@@ -382,6 +382,14 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
   create_bd_cell -type hier $name
   set filter_name "cic_interpolator"
 
+  set fir_name "fir_compensator"
+  set n_fir 2 ; # FIR on the I/Q pair of complex channel 0 only, same as RX
+  if {$n_active_chan < $n_fir} {
+    error "ad_add_cic_interpolation_filter: TX FIR needs n_active_chan >= $n_fir"
+  }
+  # unity placeholder: center tap = 16384 (1.0 in Q1.14), 47 taps, index 23
+  set init_coeff_vector [join [lreplace [lrepeat 47 0] 23 23 16384] ","]
+
   create_bd_pin -dir I $name/aclk
   create_bd_pin -dir I $name/aresetn
   create_bd_pin -dir I $name/bypass
@@ -391,6 +399,13 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
   # full_rate_strobe: the downstream TPL's own per-cycle "latching now" strobe, used to pace
   # fifo_rd_en in bypass mode only, so bypass reproduces today's behavior bit-for-bit.
   create_bd_pin -dir I $name/full_rate_strobe
+  create_bd_pin -dir I $name/fifo_rd_valid
+  create_bd_pin -dir I $name/fifo_rd_underflow
+  create_bd_pin -dir I $name/fir_bypass
+  create_bd_pin -dir I $name/fir_load
+  create_bd_pin -dir O $name/fir_busy
+  create_bd_pin -dir O -from 5 -to 0 $name/fir_coef_addr
+  create_bd_pin -dir I -from 15 -to 0 $name/fir_coef_rdata
   # fifo_rd_en: single shared pop-request strobe, meant to drive a util_upack2-style
   # fifo_rd_en port (only bit 0 of that vector port is functionally significant, so a
   # scalar driver here, broadcast onto the wider port by ad_connect, is correct).
@@ -505,7 +520,10 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
       # next pop), so it's safe to present continuously with tvalid tied high -- the
       # CIC's own tready (once every R cycles) is what actually paces the pop, via
       # rden_mux above.
-      ad_connect $name/data_in_$i $name/${filter_name}_${i}/s_axis_data_tdata
+        if {$i >= $n_fir} {
+        ad_connect $name/data_in_$i $name/${filter_name}_${i}/s_axis_data_tdata
+        }
+
       ad_connect VCC $name/${filter_name}_${i}/s_axis_data_tvalid
 
       ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/out_mux_${i}/data_in_0
@@ -531,4 +549,128 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
     ad_connect $name/bypass $name/out_mux_${i}/select_path
     ad_connect $name/out_mux_${i}/data_out $name/data_out_$i
   }
+
+  # ---- TX FIR compensation, channels 0/1 (step 1: placeholder coeffs, no
+  # sequencer, fir_bypass tied 0). Path: data_in_$i -> FIR -> 24->16 sat ->
+  # hold reg -> fir_in_mux -> CIC s_axis_data_tdata. The raw data_in_$i ->
+  # out_mux data_in_1 bypass path above is untouched.
+  ad_ip_instance proc_sys_reset $name/fir_rstgen
+  ad_ip_parameter $name/fir_rstgen CONFIG.C_EXT_RST_WIDTH 1
+  ad_ip_parameter $name/fir_rstgen CONFIG.C_EXT_RESET_HIGH 0
+  ad_connect $name/aresetn $name/fir_rstgen/ext_reset_in
+  ad_connect $name/aclk $name/fir_rstgen/slowest_sync_clk
+
+  foreach f {fir_out_sat.v fir_out_hold.v fir_coef_seq.v} {
+    if {[llength [get_files -quiet */$f]] == 0} {
+      add_files -norecurse $ad_hdl_dir/projects/common/xilinx/$f
+    }
+  }
+
+  # FIR input valid = pop with data OR pop with underflow (zeros flow through)
+  create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 $name/fir_in_valid_or
+  set_property -dict [list CONFIG.C_SIZE {1} CONFIG.C_OPERATION {or}] [get_bd_cells $name/fir_in_valid_or]
+  ad_connect $name/fifo_rd_valid $name/fir_in_valid_or/Op1
+  ad_connect $name/fifo_rd_underflow $name/fir_in_valid_or/Op2
+  # NOTE: the FIR input valid is deliberately NOT gated by bypass. The FIR core
+  # only completes a coefficient reload while samples flow into it, so a reload
+  # issued while the CIC is in bypass would stall (busy stuck) if it were starved.
+  # In bypass its output is unused, so dropped samples there are harmless.
+
+
+
+  for {set i 0} {$i < $n_fir} {incr i} {
+    ad_ip_instance fir_compiler $name/${fir_name}_${i} [ list \
+      Filter_Type                  Single_Rate \
+      Rate_Change_Type             Integer \
+      RateSpecification            Input_Sample_Period \
+      SamplePeriod                 $min_rate \
+      Coefficient_Reload           true \
+      Num_Reload_Slots             1 \
+      Coefficient_Sets             1 \
+      CoefficientSource            Vector \
+      CoefficientVector            $init_coeff_vector \
+      Coefficient_Width            16 \
+      Coefficient_Fractional_Bits  0 \
+      Coefficient_Sign             Signed \
+      Coefficient_Structure        Symmetric \
+      Quantization                 Integer_Coefficients \
+      Data_Width                   $data_width \
+      Output_Rounding_Mode         Symmetric_Rounding_to_Zero \
+      Output_Width                 24 \
+      Filter_Architecture          Systolic_Multiply_Accumulate \
+      Number_Channels              1 \
+      S_DATA_Has_FIFO              true \
+      M_DATA_Has_TREADY            false \
+      Has_ARESETn                  true \
+      Has_ACLKEN                   false \
+    ]
+
+    ad_connect $name/aclk $name/${fir_name}_${i}/aclk
+    ad_connect $name/fir_rstgen/peripheral_aresetn $name/${fir_name}_${i}/aresetn
+    ad_connect $name/data_in_$i $name/${fir_name}_${i}/s_axis_data_tdata
+    ad_connect $name/fir_in_valid_or/Res $name/${fir_name}_${i}/s_axis_data_tvalid
+
+    create_bd_cell -type module -reference fir_out_sat $name/fir_out_sat_$i
+    set_property -dict [list \
+      CONFIG.IN_WIDTH  {24} \
+      CONFIG.OUT_WIDTH $data_width \
+    ] [get_bd_cells $name/fir_out_sat_$i]
+    ad_connect $name/${fir_name}_${i}/m_axis_data_tdata $name/fir_out_sat_$i/din
+
+    create_bd_cell -type module -reference fir_out_hold $name/fir_out_hold_$i
+    set_property -dict [list CONFIG.DATA_WIDTH $data_width] [get_bd_cells $name/fir_out_hold_$i]
+    ad_connect $name/aclk $name/fir_out_hold_$i/clk
+    ad_connect $name/fir_rstgen/peripheral_aresetn $name/fir_out_hold_$i/aresetn
+    ad_connect $name/${fir_name}_${i}/m_axis_data_tvalid $name/fir_out_hold_$i/en
+    ad_connect $name/fir_out_sat_$i/dout $name/fir_out_hold_$i/din
+
+    create_bd_cell -type module -reference ad_bus_mux $name/fir_in_mux_$i
+    set_property -dict [list CONFIG.DATA_WIDTH $data_width] [get_bd_cells $name/fir_in_mux_$i]
+    ad_connect $name/fir_out_hold_$i/dout $name/fir_in_mux_$i/data_in_0
+    ad_connect $name/data_in_$i $name/fir_in_mux_$i/data_in_1
+    ad_connect $name/fir_in_mux_$i/data_out $name/${filter_name}_${i}/s_axis_data_tdata
+  }
+
+  # ---- coefficient reload sequencer (TX). FOLD_LOG2=2 remaps beat order
+  # for the SamplePeriod=4 folded core (verified in simulation). Same reset
+  # domain and same reasoning as the RX FIR: never reset on a rate change.
+  create_bd_cell -type module -reference fir_coef_seq $name/coef_seq
+  set_property -dict [list \
+    CONFIG.DATA_WIDTH   {16} \
+    CONFIG.NUM_TAPS     {24} \
+    CONFIG.ADDR_WIDTH   {6} \
+    CONFIG.CONFIG_WIDTH {8} \
+    CONFIG.FOLD_LOG2    {2} \
+  ] [get_bd_cells $name/coef_seq]
+
+  ad_connect $name/aclk $name/coef_seq/clk
+  ad_connect $name/fir_rstgen/peripheral_aresetn $name/coef_seq/aresetn
+  ad_connect $name/fir_load $name/coef_seq/load
+  ad_connect $name/coef_seq/busy $name/fir_busy
+  ad_connect $name/coef_seq/coef_addr $name/fir_coef_addr
+  ad_connect $name/fir_coef_rdata $name/coef_seq/coef_rdata
+
+  for {set i 0} {$i < $n_fir} {incr i} {
+    ad_connect $name/coef_seq/reload_tdata $name/${fir_name}_${i}/s_axis_reload_tdata
+    ad_connect $name/coef_seq/reload_tvalid $name/${fir_name}_${i}/s_axis_reload_tvalid
+    ad_connect $name/coef_seq/reload_tlast $name/${fir_name}_${i}/s_axis_reload_tlast
+    ad_connect $name/coef_seq/config_tdata $name/${fir_name}_${i}/s_axis_config_tdata
+    ad_connect $name/coef_seq/config_tvalid $name/${fir_name}_${i}/s_axis_config_tvalid
+    ad_connect $name/fir_bypass $name/fir_in_mux_${i}/select_path
+  }
+  ad_connect $name/${fir_name}_0/s_axis_reload_tready $name/coef_seq/reload_tready
+  ad_connect $name/${fir_name}_0/s_axis_config_tready $name/coef_seq/config_tready
+
+  # tie-offs, scoped inside the hierarchy (same boundary-pin reason as the
+  # out_mux tie-offs above). select_path 0 = FIR path; reload/config unused
+  # until the sequencer step.
+  current_bd_instance [get_bd_cells $name]
+  for {set i 0} {$i < $n_fir} {incr i} {
+    ad_connect GND fir_in_mux_${i}/valid_in_0
+    ad_connect GND fir_in_mux_${i}/enable_in_0
+    ad_connect GND fir_in_mux_${i}/valid_in_1
+    ad_connect GND fir_in_mux_${i}/enable_in_1
+  }
+  current_bd_instance /
+
 }

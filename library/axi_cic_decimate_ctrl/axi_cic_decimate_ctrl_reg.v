@@ -53,6 +53,11 @@ module axi_cic_decimate_ctrl_reg #(
   output                      fir_load,
   input   [ADDR_WIDTH-1:0]    fir_coef_addr,
   output  [COEF_WIDTH-1:0]    fir_coef_rdata,
+  output                      tx_fir_bypass,
+  input                       tx_fir_busy,
+  output                      tx_fir_load,
+  input   [ADDR_WIDTH-1:0]    tx_fir_coef_addr,
+  output  [COEF_WIDTH-1:0]    tx_fir_coef_rdata,
 
   input                       tx_clk,
   output  [RATE_WIDTH-1:0]    tx_dec_rate,
@@ -60,7 +65,7 @@ module axi_cic_decimate_ctrl_reg #(
   input                       tx_dec_busy,
 
   // bus interface (word address, 6 bits - covers 0x00 to 0x3F, needed
-  // since the FIR registers now extend up to 0x24)
+  // since the FIR registers now extend up to 0x34)
 
   input                       up_rstn,
   input                       up_clk,
@@ -76,7 +81,7 @@ module axi_cic_decimate_ctrl_reg #(
 
   // internal registers
 
-  reg     [31:0]              up_version = 32'h00010000;
+  reg     [31:0]              up_version = 32'h00010100;
   reg     [31:0]              up_scratch = 32'h0;
 
   reg     [RATE_WIDTH-1:0]    up_rx_cic_rate = 'd4;
@@ -135,6 +140,47 @@ module axi_cic_decimate_ctrl_reg #(
 
   assign fir_load = fir_load_tgl_m[2] ^ fir_load_tgl_m[1];
 
+  // ---- TX FIR control: independent of the RX FIR above (TX droop
+  // correction needs its own coefficient set). Registers 0x30-0x34
+  // mirror RX 0x20-0x24; all FIR-side logic is in the tx_clk domain.
+
+  reg     [ADDR_WIDTH-1:0]    up_tx_coef_ptr = 'd0;
+  reg                         up_tx_fir_bypass = 1'b1;   // bypass enabled by default/reset
+  reg                         up_tx_fir_load_tgl = 1'b0;
+
+  reg     [COEF_WIDTH-1:0]    tx_coef_mem [0:NUM_TAPS-1];
+
+  // Power-up coefficient contents = unity filter (center tap 1.0 in Q1.14),
+  // so a FIR_LOAD issued before any coefficients are written still passes
+  // data unchanged instead of loading an all-zero filter.
+  integer init_i;
+  initial begin
+    for (init_i = 0; init_i < NUM_TAPS; init_i = init_i + 1) begin
+      coef_mem[init_i] = 16'd0;
+      tx_coef_mem[init_i] = 16'd0;
+    end
+    coef_mem[NUM_TAPS-1] = 16'd16384;
+    tx_coef_mem[NUM_TAPS-1] = 16'd16384;
+  end
+
+  assign tx_fir_coef_rdata = tx_coef_mem[tx_fir_coef_addr];
+
+  reg                         up_tx_fir_busy_m1 = 1'b0;
+  reg                         up_tx_fir_busy_m2 = 1'b0;
+
+  always @(posedge up_clk) begin
+    up_tx_fir_busy_m1 <= tx_fir_busy;
+    up_tx_fir_busy_m2 <= up_tx_fir_busy_m1;
+  end
+
+  reg     [2:0]               tx_fir_load_tgl_m = 3'd0;
+
+  always @(posedge tx_clk) begin
+    tx_fir_load_tgl_m <= {tx_fir_load_tgl_m[1:0], up_tx_fir_load_tgl};
+  end
+
+  assign tx_fir_load = tx_fir_load_tgl_m[2] ^ tx_fir_load_tgl_m[1];
+
   always @(negedge up_rstn or posedge up_clk) begin
     if (up_rstn == 0) begin
       up_wack <= 'd0;
@@ -146,8 +192,28 @@ module axi_cic_decimate_ctrl_reg #(
       up_coef_ptr <= 'd0;
       up_fir_bypass <= 1'b1;
       up_fir_load_tgl <= 1'b0;
+      up_tx_coef_ptr <= 'd0;
+      up_tx_fir_bypass <= 1'b1;
+      up_tx_fir_load_tgl <= 1'b0;
     end else begin
       up_wack <= up_wreq;
+      // TX FIR: COEF_DATA (0x30), PTR_RST (0x31), LOAD (0x32), BYPASS (0x33);
+      // same semantics as the RX FIR registers at 0x20-0x23
+      if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h30)) begin
+        tx_coef_mem[up_tx_coef_ptr] <= up_wdata[COEF_WIDTH-1:0];
+        if (up_tx_coef_ptr < NUM_TAPS-1) begin
+          up_tx_coef_ptr <= up_tx_coef_ptr + 1'b1;
+        end
+      end
+      if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h31)) begin
+        up_tx_coef_ptr <= 'd0;
+      end
+      if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h32)) begin
+        up_tx_fir_load_tgl <= ~up_tx_fir_load_tgl;
+      end
+      if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h33)) begin
+        up_tx_fir_bypass <= up_wdata[0];
+      end
       if ((up_wreq == 1'b1) && (up_waddr[5:0] == 6'h01)) begin
         up_scratch <= up_wdata;
       end
@@ -211,6 +277,8 @@ module axi_cic_decimate_ctrl_reg #(
           6'h13: up_rdata <= {30'h0, up_tx_busy_m2, up_tx_cic_bypass};
           6'h23: up_rdata <= {30'h0, up_fir_busy_m2, up_fir_bypass};
           6'h24: up_rdata <= {{(32-ADDR_WIDTH){1'b0}}, up_coef_ptr};
+          6'h33: up_rdata <= {30'h0, up_tx_fir_busy_m2, up_tx_fir_bypass};
+          6'h34: up_rdata <= {{(32-ADDR_WIDTH){1'b0}}, up_tx_coef_ptr};
           default: up_rdata <= 32'h0;
         endcase
       end else begin
@@ -260,5 +328,18 @@ module axi_cic_decimate_ctrl_reg #(
     .d_rst (1'b0),
     .d_clk (clk),
     .d_data_cntrl (fir_bypass));
+
+  // up_clk -> tx_clk transfer of tx_fir_bypass, same primitive as the RX leg
+
+  up_xfer_cntrl #(
+    .DATA_WIDTH (1)
+  ) i_tx_fir_xfer_cntrl (
+    .up_rstn (up_rstn),
+    .up_clk (up_clk),
+    .up_data_cntrl (up_tx_fir_bypass),
+    .up_xfer_done (),
+    .d_rst (1'b0),
+    .d_clk (tx_clk),
+    .d_data_cntrl (tx_fir_bypass));
 
 endmodule

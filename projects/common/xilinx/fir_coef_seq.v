@@ -77,7 +77,8 @@ module fir_coef_seq #(
   parameter DATA_WIDTH = 16,
   parameter NUM_TAPS = 47,
   parameter ADDR_WIDTH = 6,
-  parameter CONFIG_WIDTH = 8
+  parameter CONFIG_WIDTH = 8,
+  parameter FOLD_LOG2 = 0
 ) (
 
   input                         clk,
@@ -112,7 +113,26 @@ module fir_coef_seq #(
   reg                           reload_tlast_r = 1'b0;
   reg                           config_tvalid_r = 1'b0;
 
-  assign coef_addr = addr;
+  // Beat order. FOLD_LOG2 = 0: natural (beat j carries coefficient j), what
+  // the SamplePeriod=1 RX core wants. FOLD_LOG2 = N: the core is folded by
+  // 2**N (SamplePeriod = 2**N) and its reload beats land on taps in groups
+  // of 2**N walking from the CENTER tap outward, ascending within a group
+  // (confirmed in simulation for NUM_TAPS=24, fold 4: beat j -> tap
+  // 20 - 4*(j>>2) + (j&3)). So beat j must carry natural coefficient
+  // (NUM_TAPS-FOLD) - FOLD*(j/FOLD) + (j%FOLD). NUM_TAPS must be a multiple
+  // of FOLD. The register file stays in natural order either way.
+  localparam FOLD = 1 << FOLD_LOG2;
+
+  generate
+    if (FOLD_LOG2 == 0) begin : g_natural
+      assign coef_addr = addr;
+    end else begin : g_folded
+      wire [ADDR_WIDTH-1:0] grp = addr >> FOLD_LOG2;
+      wire [ADDR_WIDTH-1:0] pos = addr & (FOLD-1);
+      assign coef_addr = (NUM_TAPS - FOLD) - (grp << FOLD_LOG2) + pos;
+    end
+  endgenerate
+
   assign reload_tdata = coef_rdata;
   assign reload_tvalid = reload_tvalid_r;
   assign reload_tlast = reload_tlast_r;
