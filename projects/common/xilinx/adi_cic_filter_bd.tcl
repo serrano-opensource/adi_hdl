@@ -127,6 +127,7 @@ proc ad_add_cic_decimation_filter {name n_chan n_active_chan number_of_stages di
       if {$i == 0} {
         # all active channels use identical config/timing, so watch only channel 0's tready
         ad_connect $name/${filter_name}_0/s_axis_config_tready $name/cfg_seq/cfg_tready
+        ad_connect $name/cic_rstgen/peripheral_aresetn $name/cfg_seq/core_aresetn
       }
     }
 
@@ -476,6 +477,7 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
       if {$i == 0} {
         # all active channels use identical config/timing, so watch only channel 0's tready
         ad_connect $name/${filter_name}_0/s_axis_config_tready $name/cfg_seq/cfg_tready
+        ad_connect $name/cic_rstgen/peripheral_aresetn $name/cfg_seq/core_aresetn
         ad_connect $name/${filter_name}_0/s_axis_data_tready $name/rden_mux/valid_in_0
       }
     }
