@@ -14,14 +14,49 @@ direction: RX is CIC then FIR (`RX_CIC_FIR`), TX is FIR then CIC
 verified in simulation, verified in a build, or not yet verified on hardware
 (section 5). Nothing in this milestone has been run on hardware yet.
 
-**Build status.** A clean rebuild from the sources with
-`Performance_Explore` (source checksum `daf2c3e6a5921053f98e8d47a411930a`) met
-timing: WNS +0.041 ns, TNS 0, WHS +0.0099 ns, 0 `no_clock`, 0 unconstrained
-internal endpoints, RX 25 / TX 7 DSP48E2 per FIR channel, and the flow wrote
-`system_top.xsa` (not `_bad_timing`). It is a single build. A second identical
-build was not run, and earlier builds of the same sources with other strategies
-failed by up to 52 ps, so the pass belongs to that `.xsa`, not to the commit:
-rebuilding from the commit may land on either side of zero.
+**Build status (TX FIR, branch `wweeks/cic-tx-fir`).** A clean rebuild from the
+sources with `Performance_Explore` (source checksum
+`daf2c3e6a5921053f98e8d47a411930a`) met timing: WNS +0.041 ns, TNS 0, WHS
++0.0099 ns, 0 `no_clock`, 0 unconstrained internal endpoints, RX 25 / TX 7
+DSP48E2 per FIR channel, and the flow wrote `system_top.xsa` (not
+`_bad_timing`). It is a single build. A second identical build was not run,
+and earlier builds of the same sources with other strategies failed by up to
+52 ps, so the pass belongs to that `.xsa`, not to the commit: rebuilding from
+the commit may land on either side of zero. This is the build FW has for
+testing.
+
+**Build status (gain-compensation fix, branch `wweeks/cic-gain-compensation`,
+based on the same commit FW is testing).** Section 1.5 adds a per-rate
+gain-compensation stage that corrects the non-power-of-two output-level bug in
+limitation 2 below. Two clean rebuilds from identical sources (checksum
+`e5b810c347cc3410ef1408d946041882`) both met timing: WNS +0.0074 ns and
++0.0176 ns, TNS 0 on both, WHS +0.0101 ns and +0.0099 ns, `check_timing` clean
+on both (0 `no_clock`, 0 unconstrained endpoints, the same 3/4 board-level
+ports as every prior build). DSP48E2: RX 25 / TX 7 per FIR channel (unchanged)
+plus 1 per `cic_gain_comp` instance (RX 0/1, TX 0/1 — 4 total, new). `.xsa`
+md5sums `57cf16863cf5acc71636e280aa3ef0b4` (build gc-1) and
+`c566d014d3afca427e7954133f34a84d` (build gc-2). Neither build carries a
+distinct `VERSION` value — both still read `0x00010100`, identical to the TX
+FIR build FW already has, so there was no register-level way to confirm the
+fix's presence on hardware.
+
+**Build status (VERSION bump, same branch, source checksum
+`364413ca33d99066f3f235fe2e9b1267`).** `VERSION` bumped to **`0x00010101`**
+(`library/axi_cic_decimate_ctrl/axi_cic_decimate_ctrl_reg.v`, `up_version`)
+specifically so this fix is distinguishable from `0x00010100` on hardware. A
+third clean build (gc-3) on the bumped sources met timing: WNS +0.0083 ns, TNS
+0, WHS +0.0092 ns; DSP48E2 unchanged (RX 25 / TX 7 per FIR channel, 1 per
+`cic_gain_comp`). The version constant is optimized out of the netlist (no
+dynamic writes to it), so it could not be confirmed by inspecting the
+implemented design directly — confirmed instead at the source level (the
+checksum above covers the edit) and by the read-case wiring
+(`up_rdata <= up_version` at address `0x00`), the same mechanism that already
+correctly carried `0x00010000` -> `0x00010100`. **This is the build going to
+FW.** `.xsa`: `adrv9026_zcu102.sdk/system_top.xsa`, md5 `388886a757592c63349a663faa1490c4`.
+Get FW to confirm `VERSION` reads `0x00010101` (`devmem 0x84AB0000 32`) as
+their first bring-up step — this is the actual proof the fix is in the
+bitstream they're running, not just something intended in the source. This
+branch is **not yet merged into `wweeks/cic-tx-fir`**.
 
 ## What changed for firmware (read this first)
 
@@ -50,10 +85,14 @@ rebuilding from the commit may land on either side of zero.
    `TX_FIR_LOAD`. Loading with no TX samples flowing (for example with the JESD
    TX link down) may leave `BUSY` high until samples start; this is inferred from
    simulation, not observed on hardware.
-6. The version register at `0x00` reads `0x00010100` (was `0x00010000`). Read
-   as major.minor.patch in ADI's usual layout (`[31:16]`, `[15:8]`, `[7:0]`)
-   that is 1.1.0 (was 1.0.0); this core's docs do not define the fields, so
-   treat it as a "newer than the milestone 02 build" marker.
+6. **The version register at `0x00` distinguishes which fixes a build has.**
+   `0x00010100` (was `0x00010000`) = TX FIR + rate-change fix. **`0x00010101`
+   = the same, plus the CIC gain-compensation fix (section 1.5)** that
+   corrects the non-power-of-two output-level bug — check this value first if
+   you're not sure which build you're running. Read as major.minor.patch in
+   ADI's usual layout (`[31:16]`, `[15:8]`, `[7:0]`); this core's docs do not
+   define the fields, so treat it as a "which fixes are present" marker, not
+   a formal semantic version.
 
 ## 1. Architecture Overview
 
@@ -169,6 +208,106 @@ cycles after each change. With the fixed sequencer it produced 125, 250, 500,
 been observed. The builds validated by FW before this milestone are expected to
 have the old behavior in both directions.
 
+### 1.5 CIC gain-compensation fix (RX and TX)
+
+**Symptom.** FW reported output levels dropping several dB whenever the CIC
+rate is not a power of two. Confirmed by a full R = 4..32 sweep of the bare
+`cic_compiler` core (DC input, both directions): flat at every power-of-two
+rate, up to -5.92 dB (TX, worst at R = 27) and -5.80 dB (RX, worst at R = 7,
+14, 28) elsewhere.
+
+**Cause.** Reconfiguring the CIC IP for `Quantization = Full_Precision`
+(needed so no bits are lost before compensation) revealed the real mechanism.
+A direct calibration sweep against the `Full_Precision` core (raw output, no
+shift, no gain) showed the output is the exact, fully unshifted product:
+`raw = input * R**EXP` (`EXP = 4` for the TX interpolator, `EXP = 5` for the RX
+decimator) — for example TX R = 5: `625000 = 1000 * 5**4`, exactly, at every
+rate checked. The bare core's normal (non-`Full_Precision`) output is that
+same raw value right-shifted by a single **fixed** amount sized for the
+worst-case rate (R = 32); at every other rate the shift throws away more than
+it should, and the shortfall is the attenuation.
+
+**Fix.** Two new files, `projects/common/xilinx/cic_gain_lut.v` and
+`cic_gain_comp.v`, inserted between each CIC core's (now `Full_Precision`)
+output and the rest of the datapath (RX: ahead of the RX FIR and the
+bypass mux; TX: the hierarchy's final output stage, since the TX FIR sits
+ahead of the CIC on that side):
+
+- `cic_gain_lut` is a lookup table, indexed by rate (4..32), giving two values
+  per rate: a per-rate right-shift amount (`shift`, the same shift the old
+  truncating core used — reproduces its raw output exactly) and a Q1.14
+  reciprocal gain (`gain`) that restores that shifted value to the level R = 32
+  already has. Both are pure functions of `R**EXP`, computed once in Python and
+  hardcoded as two `case` statements (`EXP = 4` instantiated for TX, `EXP = 5`
+  for RX — same module, one parameter).
+- `cic_gain_comp` applies them: `raw >>> shift`, then multiply by `gain`
+  (Q1.14), round to nearest, saturate to 16 bits. Three pipeline stages.
+- Both are fed from a **new `active_rate` output on `cic_cfg_seq`**, not the
+  raw `rate` input pin: `active_rate` only updates once the rate-change
+  sequencer has confirmed the CIC core accepted the new rate (the same
+  `cfg_tready` handshake the 1.4 fix already uses), so the gain and shift never
+  run ahead of the core during a rate change. This closes a real bug caught
+  before it was ever built: tying the LUT to the raw `rate` pin would have
+  applied the *new* rate's compensation for the ~60 cycles the core is still
+  finishing the *old* rate.
+- On TX, `gain_comp`'s `din_valid` ties to `VCC` (the CIC input is already
+  free-running there) and `dout_valid` is left unconnected, matching the
+  existing convention that this datapath has no real valid signal (the JESD TX
+  transport has no valid input). On RX, `din_valid`/`dout_valid` carry the
+  CIC core's real `m_axis_data_tvalid` through to the downstream mux.
+
+**Two bugs found and fixed during this work, both in `cic_gain_comp.v` before
+the design was ever built:**
+1. **Missing shift stage.** The first version multiplied the *raw*, unshifted
+   `Full_Precision` output directly by the Q1.14 gain, which just saturated at
+   max positive at every rate (confirmed in a real-hierarchy simulation before
+   the fix). The shift above was the missing piece.
+2. **`PROD_WIDTH` undersized by 2 bits.** An `(N+1)`-bit signed times a 17-bit
+   signed product needs `N+18` bits to represent exactly; the first version
+   declared `N+16`. Harmless before the shift fix (the raw operand was so wide
+   the shortfall never bit), but fixed properly once the shift narrowed the
+   operand down to a size where it would have mattered.
+
+**A third issue surfaced only in the full project build**, not in any
+standalone simulation: `cic_gain_comp.v`'s ports were originally named
+`din`/`dout`. The full `adrv9026_zcu102` project loads the entire ADI library
+as an IP repository, which defines a custom bus interface
+(`analog.com:interface:fifo_rd`) that Vivado's IP packager auto-infers from
+ports literally named `din`/`dout` — silently turning them into interface
+pins that then cannot connect to an ordinary pin (`ad_connect: Cannot connect
+non-interface to interface`). No scratch/elaboration test ever loaded that
+same IP repository, so nothing caught this until the real build. Fixed by
+renaming to `gain_din`/`gain_dout` (`din_valid`/`dout_valid` unaffected).
+
+**Verification (real modified hierarchy in simulation, not the bare core; DC
+input 1000, relative to R = 4):**
+
+| R | RX dB | TX dB | R | RX dB | TX dB | R | RX dB | TX dB |
+|---|---|---|---|---|---|---|---|---|
+| 4 | 0.00 | 0.00 | 14 | -0.02 | 0.00 | 24 | 0.00 | -0.01 |
+| 5 | -0.01 | -0.01 | 15 | 0.00 | -0.01 | 25 | 0.00 | 0.00 |
+| 6 | 0.00 | -0.01 | 16 | 0.00 | 0.00 | 26 | 0.00 | -0.01 |
+| 7 | -0.02 | 0.00 | 17 | 0.00 | 0.00 | 27 | 0.00 | -0.02 |
+| 8 | 0.00 | 0.00 | 18 | 0.00 | -0.01 | 28 | -0.02 | 0.00 |
+| 9 | 0.00 | -0.01 | 19 | -0.01 | 0.00 | 29 | 0.00 | -0.01 |
+| 10 | -0.01 | -0.01 | 20 | -0.01 | -0.01 | 30 | 0.00 | -0.01 |
+| 11 | -0.01 | -0.01 | 21 | -0.01 | -0.01 | 31 | 0.00 | -0.01 |
+| 12 | 0.00 | -0.01 | 22 | -0.01 | -0.01 | 32 | 0.00 | 0.00 |
+| 13 | 0.00 | -0.01 | 23 | 0.00 | -0.01 | | | |
+
+Flat within +/-0.02 dB at every rate on both sides (worst case R = 27, both
+directions) versus -5.92 dB (TX) / -5.80 dB (RX) before the fix. The residual
++/-0.01/0.02 dB is Q1.14 gain rounding, not a rate-dependent trend.
+
+**Resource cost.** 1 DSP48E2 per `cic_gain_comp` instance (RX 0/1, TX 0/1 — 4
+total), confirmed on both clean builds; a plain barrel shifter otherwise
+(no DSP). Negligible next to the 25 (RX) / 7 (TX) DSP48E2 already used per FIR
+channel.
+
+**Not yet done:** merging this branch into `wweeks/cic-tx-fir`, updating the
+FW programming guide, and hardware verification (VERSION readback is the
+first step FW should take — see the build-status note above).
+
 ## 2. Files
 
 | File | Change |
@@ -185,6 +324,16 @@ have the old behavior in both directions.
 changes only the implementation strategy line (section 5); it now sets
 `Performance_Explore`.
 
+**Gain-compensation fix (branch `wweeks/cic-gain-compensation`, section 1.5;
+not yet merged into the branch above):**
+
+| File | Change |
+|---|---|
+| `projects/common/xilinx/cic_gain_lut.v` | **new**: per-rate shift + Q1.14 gain lookup |
+| `projects/common/xilinx/cic_gain_comp.v` | **new**: shift, multiply, round, saturate stage |
+| `projects/common/xilinx/cic_cfg_seq.v` | new `active_rate` output, latched once the core accepts a rate change |
+| `projects/common/xilinx/adi_cic_filter_bd.tcl` | both procs: `Quantization` -> `Full_Precision`, `cic_gain_lut`/`cic_gain_comp` instances and wiring |
+
 ## 3. Register Map (additions)
 
 Byte offsets (word address x 4), in the AXI-Lite space of
@@ -199,12 +348,15 @@ crossings mirror the RX FIR ones.
 | `0xCC` | `TX_FIR_CONFIG` | RW/RO |
 | `0xD0` | `TX_FIR_COEF_COUNT` | RO |
 
-**Changed register.** `VERSION` (`0x00`, RO) now reads `0x00010100` (was
-`0x00010000`). In ADI's usual layout (`[31:16]` major, `[15:8]` minor, `[7:0]`
-patch) that is 1.1.0 instead of 1.0.0; this core's docs do not define the
-fields, so treat it as a marker that the build has the TX FIR registers, the
-unity power-up contents and the CIC rate-change fix. Existing register
-addresses are unchanged (the CIC `BUSY` bits stay high longer after a rate
+**Changed register.** `VERSION` (`0x00`, RO) reads `0x00010100` on the TX FIR
+build (`wweeks/cic-tx-fir`, was `0x00010000`) and **`0x00010101`** on this
+gain-compensation build (`wweeks/cic-gain-compensation`, section 1.5) — the
+patch field distinguishes "TX FIR + rate-change fix" from "TX FIR +
+rate-change fix + gain compensation". In ADI's usual layout (`[31:16]` major,
+`[15:8]` minor, `[7:0]` patch) `0x00010101` is 1.1.1; this core's docs do not
+define the fields, so treat it as a marker of which fixes are present rather
+than a formal semantic version. Existing register addresses are unchanged (the
+CIC `BUSY` bits stay high longer after a rate
 write, see 1.4).
 
 ### `TX_FIR_COEF_DATA` (0xC0) — WO
@@ -325,6 +477,18 @@ experiments on the same sources:
 | 6 | `Performance_Explore` | **+0.030 / 0** | +0.0104 / 0 | 0 |
 | 7 | `Performance_Explore`, clean rebuild from sources (`system_top.xsa`) | **+0.041 / 0** | +0.0099 / 0 | 0 |
 
+**Gain-compensation fix builds** (branch `wweeks/cic-gain-compensation`, source
+checksum `e5b810c347cc3410ef1408d946041882` on both, `check_timing` clean on
+both, DSP48E2 RX 25 / TX 7 per FIR channel plus 1 per `cic_gain_comp` instance
+on both):
+
+| Build | Strategy | WNS / TNS (ns) | WHS / THS (ns) | `.xsa` md5 |
+|---|---|---|---|---|
+| gc-1 | `Performance_Explore` | +0.0074 / 0 | +0.0101 / 0 | `57cf16863cf5acc71636e280aa3ef0b4` |
+| gc-2 (rebuild of gc-1, identical sources) | `Performance_Explore` | +0.0176 / 0 | +0.0099 / 0 | `c566d014d3afca427e7954133f34a84d` |
+| gc-3 (`VERSION` bumped to `0x00010101`, source checksum `364413ca33d99066f3f235fe2e9b1267`) | `Performance_Explore` | +0.0083 / 0 | +0.0092 / 0 | `388886a757592c63349a663faa1490c4` |
+
+
 - **`check_timing` and DSP counts** were checked on build 1 only: 0 `no_clock`,
   0 `unconstrained_internal_endpoints`, the same 3 unconstrained inputs and 5
   outputs as before, RX 25 and TX 7 DSP48E2 per FIR channel. Builds 2 and 3 use
@@ -406,6 +570,7 @@ experiments on the same sources:
 | CIC rate-change fix on the RX decimator (R = 32, 16, 8, 5, 4), and reproduction of the bug with the committed sequencer | Verified in simulation (exported RX hierarchy) |
 | Full TX datapath (behavioral upacker model -> FIR -> CIC -> output muxes) at R = 32, 16, 8, 5, 4: pop rate = one per R cycles; unity FIR = FIR-bypassed path delayed by whole samples on channels 0 and 1; upacker underflow zeros flow through identically; zero-coefficient load silences 0/1; channels 2-7 zero; CIC bypass = raw passthrough on all 8 channels | Verified in simulation (0 failures) |
 | Bypass-exit transient (filter state after leaving CIC bypass) | Only partly characterized (limitation 3) |
+| Gain-compensation fix (section 1.5): real RX/TX hierarchy simulation across R = 4..32, two clean timing-passing builds | Verified in simulation and build; not merged into the FW branch; not yet on hardware |
 | Everything on hardware | **Not yet verified** |
 
 ## 6. Known Limitations / Open Items
@@ -417,13 +582,12 @@ experiments on the same sources:
    check: set the rate register to 8, then 32, with a known signal, and see
    whether the DAC tone frequency (TX) or the decimated data rate (RX) changes
    relative to R=4.
-2. **CIC output level depends on R for some rates.** In the standalone
-   interpolator core simulation (16-bit output, truncation), a DC input of 1000
-   came out as exactly 1000 at R = 4, 8, 16 and 32 but as 610 at R = 5. The
-   full TX design shows the same effect: the output swing for the same test
-   signal was about 49,000 at R = 4, 8, 16 and 32 and 30,019 (about 61%) at
-   R = 5. The cause is not confirmed (a power-of-two output scaling is one
-   candidate); other rates and the decimator were not tested.
+2. **CIC output level depends on R for some rates — FIXED, see section 1.5.**
+   Root cause confirmed (a fixed output-truncation shift sized for R = 32) and
+   corrected in RTL on branch `wweeks/cic-gain-compensation` (not yet merged
+   into this branch, not yet on FW's build). Full R = 4..32 tables for both
+   directions, before and after, are in section 1.5. Two clean builds pass
+   timing with the fix in place; not yet verified on hardware.
 3. **FIR path on leaving CIC bypass.** In bypass the FIR receives full-rate
    pops that its input FIFO cannot keep up with, so samples are dropped and its
    state is a gappy history when interpolation resumes. Measured effect at R = 4
