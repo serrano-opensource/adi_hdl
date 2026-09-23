@@ -75,6 +75,8 @@ proc ad_add_cic_decimation_filter {name n_chan n_active_chan number_of_stages di
 
   add_files -norecurse $ad_hdl_dir/library/common/ad_bus_mux.v
   add_files -norecurse $ad_hdl_dir/projects/common/xilinx/cic_cfg_seq.v
+  add_files -norecurse $ad_hdl_dir/projects/common/xilinx/cic_gain_lut.v
+  add_files -norecurse $ad_hdl_dir/projects/common/xilinx/cic_gain_comp.v
 
   # shared config-channel sequencer - broadcasts rate/reset to every channel instance
   create_bd_cell -type module -reference cic_cfg_seq $name/cfg_seq
@@ -85,6 +87,16 @@ proc ad_add_cic_decimation_filter {name n_chan n_active_chan number_of_stages di
   ad_connect $name/aresetn $name/cfg_seq/aresetn
   ad_connect $name/rate $name/cfg_seq/rate
   ad_connect $name/cfg_seq/busy $name/busy
+
+  # Per-rate gain compensation: restores the level the bare CIC core already
+  # gives at R=32 to every other rate (see cic_gain_lut.v). Fed from the
+  # active_rate output of cfg_seq, NOT the raw $name/rate pin -- active_rate
+  # only updates once the core has actually adopted the new rate (see
+  # cic_cfg_seq.v), so compensation never runs ahead of the core during a
+  # rate change.
+  create_bd_cell -type module -reference cic_gain_lut $name/gain_lut
+  set_property -dict [list CONFIG.EXP {5}] [get_bd_cells $name/gain_lut]
+  ad_connect $name/cfg_seq/active_rate $name/gain_lut/rate
 
   # synchronize the sequencer-generated active-low CIC reset to the CIC clock
   ad_ip_instance proc_sys_reset $name/cic_rstgen
@@ -111,8 +123,7 @@ proc ad_add_cic_decimation_filter {name n_chan n_active_chan number_of_stages di
         RateSpecification    Sample_Period \
         SamplePeriod         1 \
         Input_Data_Width     $data_width \
-        Quantization         Truncation \
-        Output_Data_Width    $data_width \
+        Quantization         Full_Precision \
         Use_Xtreme_DSP_Slice true \
         HAS_DOUT_TREADY      false \
         HAS_ACLKEN           false \
@@ -152,8 +163,16 @@ proc ad_add_cic_decimation_filter {name n_chan n_active_chan number_of_stages di
       ad_connect $name/valid_in_$i $name/${filter_name}_${i}/s_axis_data_tvalid
       ad_connect $name/data_in_$i $name/${filter_name}_${i}/s_axis_data_tdata
 
-      ad_connect $name/${filter_name}_${i}/m_axis_data_tvalid $name/out_mux_${i}/valid_in_0
-      ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/out_mux_${i}/data_in_0
+      create_bd_cell -type module -reference cic_gain_comp $name/gain_comp_$i
+      set_property -dict [list CONFIG.IN_WIDTH {48} CONFIG.OUT_WIDTH $data_width] [get_bd_cells $name/gain_comp_$i]
+      ad_connect $name/aclk $name/gain_comp_$i/clk
+      ad_connect $name/cic_rstgen/peripheral_aresetn $name/gain_comp_$i/aresetn
+      ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/gain_comp_$i/gain_din
+      ad_connect $name/${filter_name}_${i}/m_axis_data_tvalid $name/gain_comp_$i/din_valid
+      ad_connect $name/gain_lut/gain $name/gain_comp_$i/gain
+      ad_connect $name/gain_lut/shift $name/gain_comp_$i/shift
+      ad_connect $name/gain_comp_$i/gain_dout $name/out_mux_${i}/data_in_0
+      ad_connect $name/gain_comp_$i/dout_valid $name/out_mux_${i}/valid_in_0
     } else {
       # scoped to the hierarchy's own current_bd_instance: connect_bd_net
       # between a root-level constant and a pin nested inside $name (e.g.
@@ -413,6 +432,8 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
 
   add_files -norecurse $ad_hdl_dir/library/common/ad_bus_mux.v
   add_files -norecurse $ad_hdl_dir/projects/common/xilinx/cic_cfg_seq.v
+  add_files -norecurse $ad_hdl_dir/projects/common/xilinx/cic_gain_lut.v
+  add_files -norecurse $ad_hdl_dir/projects/common/xilinx/cic_gain_comp.v
 
   # shared config-channel sequencer - broadcasts rate/reset to every channel instance
   create_bd_cell -type module -reference cic_cfg_seq $name/cfg_seq
@@ -423,6 +444,16 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
   ad_connect $name/aresetn $name/cfg_seq/aresetn
   ad_connect $name/rate $name/cfg_seq/rate
   ad_connect $name/cfg_seq/busy $name/busy
+
+  # Per-rate gain compensation: restores the level the bare CIC core already
+  # gives at R=32 to every other rate (see cic_gain_lut.v). Fed from the
+  # active_rate output of cfg_seq, NOT the raw $name/rate pin -- active_rate
+  # only updates once the core has actually adopted the new rate (see
+  # cic_cfg_seq.v), so compensation never runs ahead of the core during a
+  # rate change.
+  create_bd_cell -type module -reference cic_gain_lut $name/gain_lut
+  set_property -dict [list CONFIG.EXP {4}] [get_bd_cells $name/gain_lut]
+  ad_connect $name/cfg_seq/active_rate $name/gain_lut/rate
 
   # synchronize the sequencer-generated active-low CIC reset to the CIC clock. Applies the
   # same fix as the decimator's cic_rstgen: driving cfg_seq/cic_aresetn straight into the CIC
@@ -476,8 +507,7 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
         RateSpecification    Sample_Period \
         SamplePeriod         $min_rate \
         Input_Data_Width     $data_width \
-        Quantization         Truncation \
-        Output_Data_Width    $data_width \
+        Quantization         Full_Precision \
         Use_Xtreme_DSP_Slice true \
         HAS_DOUT_TREADY      false \
         HAS_ACLKEN           false \
@@ -526,7 +556,15 @@ proc ad_add_cic_interpolation_filter {name n_chan n_active_chan number_of_stages
 
       ad_connect VCC $name/${filter_name}_${i}/s_axis_data_tvalid
 
-      ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/out_mux_${i}/data_in_0
+      create_bd_cell -type module -reference cic_gain_comp $name/gain_comp_$i
+      set_property -dict [list CONFIG.IN_WIDTH {40} CONFIG.OUT_WIDTH $data_width] [get_bd_cells $name/gain_comp_$i]
+      ad_connect $name/aclk $name/gain_comp_$i/clk
+      ad_connect $name/cic_rstgen/peripheral_aresetn $name/gain_comp_$i/aresetn
+      ad_connect $name/${filter_name}_${i}/m_axis_data_tdata $name/gain_comp_$i/gain_din
+      ad_connect VCC $name/gain_comp_$i/din_valid
+      ad_connect $name/gain_lut/gain $name/gain_comp_$i/gain
+      ad_connect $name/gain_lut/shift $name/gain_comp_$i/shift
+      ad_connect $name/gain_comp_$i/gain_dout $name/out_mux_${i}/data_in_0
     }
     # scoped to the hierarchy's own current_bd_instance: connect_bd_net
     # between a root-level constant and a pin nested inside $name (e.g.
