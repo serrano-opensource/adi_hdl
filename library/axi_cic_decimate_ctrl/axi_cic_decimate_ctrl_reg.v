@@ -81,7 +81,7 @@ module axi_cic_decimate_ctrl_reg #(
 
   // internal registers
 
-  reg     [31:0]              up_version = 32'h00010100;
+  reg     [31:0]              up_version = 32'h00010101;
   reg     [31:0]              up_scratch = 32'h0;
 
   reg     [RATE_WIDTH-1:0]    up_rx_cic_rate = 'd4;
