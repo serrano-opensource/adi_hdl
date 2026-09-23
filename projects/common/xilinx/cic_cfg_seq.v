@@ -90,7 +90,8 @@ module cic_cfg_seq #(
   output                    cfg_tvalid,
   input                     cfg_tready,
 
-  output                    busy
+  output                    busy,
+  output  [RATE_WIDTH-1:0]  active_rate  // rate the core has actually adopted; latched in ST_CFG once cfg_tready fires
 );
 
   localparam ST_RST  = 3'd0;
@@ -106,10 +107,12 @@ module cic_cfg_seq #(
   reg                                cic_aresetn_r = 1'b0;
   reg                                cfg_tvalid_r = 1'b0;
   reg [RATE_WIDTH-1:0]               cfg_tdata_r = 'd0;
+  reg [RATE_WIDTH-1:0]               active_rate_r = 'd4;  // power-up default, same as rate_d
 
   assign cic_aresetn = cic_aresetn_r;
   assign cfg_tdata = cfg_tdata_r;
   assign cfg_tvalid = cfg_tvalid_r;
+  assign active_rate = active_rate_r;
   assign busy = (state != ST_IDLE);
 
   always @(posedge clk) begin
@@ -129,6 +132,7 @@ module cic_cfg_seq #(
       cic_aresetn_r <= 1'b0;
       cfg_tvalid_r <= 1'b0;
       cfg_tdata_r <= 'd0;
+      active_rate_r <= 'd4;
     end else begin
       case (state)
         ST_RST: begin
@@ -161,6 +165,7 @@ module cic_cfg_seq #(
           if (cfg_tready == 1'b1) begin
             cfg_tvalid_r <= 1'b0;
             state <= ST_IDLE;
+            active_rate_r <= cfg_tdata_r;  // core has now adopted this rate
           end
         end
         default: begin // ST_IDLE
